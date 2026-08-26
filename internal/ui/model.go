@@ -88,13 +88,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus("saved")
 			return m, nil
 
-		// "shift+insert"/"ctrl+insert" are what actually arrives here for
-		// Omarchy's system-wide Super+V/Super+C: Hyprland's universal
-		// clipboard shortcut synthesizes those specific combos for
-		// terminal-tagged windows (see bindings/clipboard.lua) rather than
-		// forwarding literal Ctrl+V/Ctrl+C. Ctrl+V/Ctrl+Y stay bound too, as
-		// a plain-terminal fallback.
-		case "ctrl+v", "shift+insert":
+		// Omarchy's Super+V/Super+C send Shift+Insert/Ctrl+Insert to
+		// focused terminal windows, not literal Ctrl+V/Ctrl+C (see
+		// bindings/clipboard.lua in the omarchy package) — but Bubble
+		// Tea's key decoder has no table entry for either combo, so an
+		// app-level bind here could never fire no matter how it's
+		// written. foot itself handles both instead (see
+		// foot-scratchpad.ini): clipboard-copy/clipboard-paste, rebound
+		// to include Ctrl+Insert/Shift+Insert, talk to the real
+		// clipboard directly and land here as ordinary typed input.
+		// Ctrl+V/Ctrl+Y remain as an explicit, selection-independent
+		// fallback: paste at cursor / copy the whole buffer.
+		case "ctrl+v":
 			text, err := clip.Paste()
 			if err != nil {
 				m.setStatus("paste failed: " + err.Error())
@@ -105,7 +110,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus("pasted")
 			return m, nil
 
-		case "ctrl+y", "ctrl+insert":
+		case "ctrl+y":
 			if err := clip.Copy(m.ta.Value()); err != nil {
 				m.setStatus("copy failed: " + err.Error())
 				return m, nil

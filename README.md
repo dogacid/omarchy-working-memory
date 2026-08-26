@@ -70,11 +70,23 @@ auto-commit ~20s after that (or immediately on `Ctrl+S` / quit).
 - **Omarchy's `Super+V`/`Super+C` aren't literally Ctrl+V/Ctrl+C for terminal
   windows.** `bindings/clipboard.lua` in the omarchy package detects the
   focused window is a terminal and synthesizes `Shift+Insert`/`Ctrl+Insert`
-  instead. Foot binds `Shift+Insert` to its own primary-selection paste by
-  default, which would swallow it before the app ever saw it — that's what
-  `foot-scratchpad.ini` (`primary-paste=none`) turns off, so it reaches the
-  app as a plain key the same way `Ctrl+Insert` already does (foot has no
-  default binding for that one).
+  instead, but only for windows whose class matches its own fixed
+  terminal-tag list (`default/hypr/apps/terminals.lua`) — which is why the
+  window class is `org.omarchy.working-memory` (matching that list's
+  `org\.omarchy\..*` pattern) rather than something arbitrary; an
+  unrecognized class falls back to literal `Ctrl+V`/`Ctrl+C`.
+- **Bubble Tea cannot decode `Shift+Insert`/`Ctrl+Insert` at all**, so an
+  app-level keybinding for either can never fire no matter how it's
+  written — `charmbracelet/bubbletea@v1.3.10`'s key-sequence table
+  (`key.go`) has no entry for the modified form of Insert, only the bare
+  key. `foot-scratchpad.ini` handles both at the terminal level instead:
+  `clipboard-copy`/`clipboard-paste` are rebound to also trigger on
+  `Control+Insert`/`Shift+Insert` (on top of foot's own defaults), which
+  talk to the real Wayland clipboard directly and land in the app as
+  ordinary typed input — no app-side decoding needed. This also fixes a
+  semantic mismatch an app-level bind would have had anyway: foot's
+  clipboard-copy copies whatever is actually *selected*, not the whole
+  buffer regardless of selection.
 - **Bubble Tea's `Init()` has a value receiver.** Calling `ta.Focus()` there
   mutates a local copy that gets discarded — the model the runtime actually
   drives never becomes focused, so it silently accepts keypresses without
