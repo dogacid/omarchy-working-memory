@@ -15,19 +15,42 @@ is_running() {
   hyprctl clients -j | jq -e --arg c "$APP_ID" '.[] | select(.class == $c)' >/dev/null 2>&1
 }
 
+# True only once the window rule has actually parked it on the special
+# workspace — not just once the window exists. There's a brief gap between
+# the window mapping (is_running becomes true) and Hyprland applying the
+# `workspace = special:... silent` rule; toggling before that gap closes
+# would reveal the special workspace while it's still empty.
+on_special_workspace() {
+  hyprctl clients -j | jq -e --arg c "$APP_ID" --arg w "special:$WORKSPACE" \
+    '.[] | select(.class == $c and .workspace.name == $w)' >/dev/null 2>&1
+}
+
+reveal() {
+  # This system's Hyprland build (Omarchy's Lua-config fork) routes CLI
+  # dispatches through `hyprctl eval` + hl.dispatch/hl.dsp.* rather than the
+  # classic `hyprctl dispatch <name> <args>` form — that form is silently
+  # rejected here (prints a Lua parse error but still exits 0).
+  hyprctl eval "hl.dispatch(hl.dsp.workspace.toggle_special(\"$WORKSPACE\"))" >/dev/null
+}
+
 if is_running; then
-  hyprctl dispatch togglespecialworkspace "$WORKSPACE" >/dev/null
+  reveal
   exit 0
 fi
 
-omarchy-launch-tui --app-id="$APP_ID" omarchy-working-memory &
+# Launched via foot explicitly rather than the user's default terminal:
+# Ghostty (this system's xdg-terminal-exec default) ignores --app-id
+# entirely, which breaks the window-rule matching below. Foot honors it
+# reliably and starts fast, which suits a single-purpose scratchpad well.
+setsid foot --app-id="$APP_ID" -e omarchy-working-memory >/dev/null 2>&1 &
+disown
 
-# Poll briefly for the window to map, then reveal its special workspace.
-# (The window rule sends it there silently, so the very first launch would
-# otherwise start invisible.)
+# Poll briefly for the window to map AND land on the special workspace,
+# then reveal it. (The window rule sends it there silently, so the very
+# first launch would otherwise start invisible.)
 for _ in $(seq 1 40); do
-  if is_running; then
-    hyprctl dispatch togglespecialworkspace "$WORKSPACE" >/dev/null
+  if on_special_workspace; then
+    reveal
     exit 0
   fi
   sleep 0.05

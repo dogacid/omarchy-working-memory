@@ -48,6 +48,24 @@ The note lives at `~/.local/share/omarchy-working-memory/working-memory.txt`
 created on first run. Edits autosave ~1s after you stop typing, and
 auto-commit ~20s after that (or immediately on `Ctrl+S` / quit).
 
+## Gotchas this repo already works around
+
+- **Ghostty ignores `--app-id`/`--class`** when launched via `xdg-terminal-exec`
+  or directly. Since Hyprland window rules need a stable identifier at the
+  moment the window maps, the toggle script launches the scratchpad via
+  `foot` explicitly (which does honor `--app-id`) rather than through the
+  system's default terminal.
+- **`hyprctl dispatch <name> <args>`** (the classic two-token CLI form) is
+  silently rejected on this Omarchy/Hyprland build — it prints a Lua parse
+  error to stderr but still exits non-zero without acting. The working form
+  is `hyprctl eval 'hl.dispatch(hl.dsp.<category>.<action>(...))'` (see
+  `bin/omarchy-working-memory-toggle`'s `reveal()`). Bindings written inside
+  `.lua` config files (e.g. `o.bind(...)`) are unaffected — this only bites
+  ad hoc CLI dispatches.
+- **Window rules apply once, at map time.** A rule matched on `title` won't
+  retroactively apply once a late title update arrives (which is how Ghostty
+  behaves) — hence matching on `class` via `foot` instead.
+
 ## Roadmap
 
 - Daily rotation / "show me the last few days" browsing.
