@@ -11,6 +11,11 @@ set -euo pipefail
 APP_ID="omarchy-working-memory"
 WORKSPACE="working-memory"
 
+# Resolve through the symlink (this script is installed as a symlink into
+# ~/.local/bin) to find the repo-provided foot config alongside it.
+REPO_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
+FOOT_CONFIG="$REPO_DIR/foot-scratchpad.ini"
+
 is_running() {
   hyprctl clients -j | jq -e --arg c "$APP_ID" '.[] | select(.class == $c)' >/dev/null 2>&1
 }
@@ -42,7 +47,7 @@ fi
 # Ghostty (this system's xdg-terminal-exec default) ignores --app-id
 # entirely, which breaks the window-rule matching below. Foot honors it
 # reliably and starts fast, which suits a single-purpose scratchpad well.
-setsid foot --app-id="$APP_ID" -e omarchy-working-memory >/dev/null 2>&1 &
+setsid foot --config="$FOOT_CONFIG" --app-id="$APP_ID" -e omarchy-working-memory >/dev/null 2>&1 &
 disown
 
 # Poll briefly for the window to map AND land on the special workspace,

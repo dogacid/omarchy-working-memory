@@ -1,6 +1,6 @@
 #!/bin/bash
 # Installs the working-memory scratchpad into this Omarchy system:
-#   - builds the TUI binary and the toggle script onto ~/.local/bin
+#   - builds the TUI binary onto ~/.local/bin and symlinks the toggle script there
 #   - symlinks the Quickshell bar-widget plugin into ~/.config/omarchy/plugins/
 #   - symlinks the Hyprland window-rule/keybinding module and wires it into
 #     ~/.config/hypr/hyprland.lua (idempotent: skips if already required)
@@ -18,7 +18,10 @@ mkdir -p "$LOCAL_BIN"
 echo "Building omarchy-working-memory..."
 go -C "$REPO_DIR" build -o "$LOCAL_BIN/omarchy-working-memory" .
 
-install -m755 "$REPO_DIR/bin/omarchy-working-memory-toggle" "$LOCAL_BIN/omarchy-working-memory-toggle"
+# Symlinked, not copied, so edits to the script (or foot-scratchpad.ini
+# alongside it, which it resolves relative to its own real path) take effect
+# immediately without rerunning this installer.
+ln -sfn "$REPO_DIR/bin/omarchy-working-memory-toggle" "$LOCAL_BIN/omarchy-working-memory-toggle"
 
 echo "Linking Quickshell plugin..."
 mkdir -p "$(dirname "$PLUGIN_DST")"
