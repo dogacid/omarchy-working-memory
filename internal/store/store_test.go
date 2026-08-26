@@ -66,3 +66,66 @@ func TestOpenSaveCommit(t *testing.T) {
 		t.Fatalf("reopen content mismatch: %q err=%v", content2, err)
 	}
 }
+
+func TestHistory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("OMARCHY_WORKING_MEMORY_DIR", filepath.Join(dir, "data"))
+
+	s, err := Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	if err := s.Save("first note\n"); err != nil {
+		t.Fatalf("Save 1: %v", err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("Commit 1: %v", err)
+	}
+
+	if err := s.Save("second note\n"); err != nil {
+		t.Fatalf("Save 2: %v", err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("Commit 2: %v", err)
+	}
+
+	log, err := s.Log()
+	if err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+	if len(log) != 2 {
+		t.Fatalf("expected 2 commits, got %d: %+v", len(log), log)
+	}
+	if log[0].Message == "" || log[1].Message == "" {
+		t.Fatalf("expected non-empty preview messages: %+v", log)
+	}
+	// newest first
+	if !log[0].Time.After(log[1].Time) && log[0].Time != log[1].Time {
+		t.Fatalf("expected newest-first order: %+v", log)
+	}
+
+	oldContent, err := s.ShowAt(log[1].Hash)
+	if err != nil {
+		t.Fatalf("ShowAt: %v", err)
+	}
+	if oldContent != "first note\n" {
+		t.Fatalf("ShowAt mismatch: %q", oldContent)
+	}
+
+	if err := s.RestoreAt(log[1].Hash, log[1].Time); err != nil {
+		t.Fatalf("RestoreAt: %v", err)
+	}
+	restored, err := s.Load()
+	if err != nil || restored != "first note\n" {
+		t.Fatalf("post-restore content mismatch: %q err=%v", restored, err)
+	}
+
+	log2, err := s.Log()
+	if err != nil {
+		t.Fatalf("Log after restore: %v", err)
+	}
+	if len(log2) != 3 {
+		t.Fatalf("expected restore to add a 3rd commit, got %d", len(log2))
+	}
+}

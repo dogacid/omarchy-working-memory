@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const fileName = "working-memory.txt"
@@ -93,6 +94,12 @@ func (s *Store) Save(content string) error {
 // Commit stages and commits the note file if it has changes. It is a no-op
 // (returns false, nil) when there is nothing to commit.
 func (s *Store) Commit() (committed bool, err error) {
+	content, _ := s.Load() // best-effort; a preview isn't worth failing the commit over
+	msg := previewLine(content) + "  (" + time.Now().Format("2006-01-02 15:04") + ")"
+	return s.commitWithMessage(msg)
+}
+
+func (s *Store) commitWithMessage(msg string) (committed bool, err error) {
 	if err := s.git("add", fileName); err != nil {
 		return false, fmt.Errorf("git add: %w", err)
 	}
@@ -105,11 +112,101 @@ func (s *Store) Commit() (committed bool, err error) {
 		return false, nil
 	}
 
-	msg := "update " + time.Now().Format("2006-01-02 15:04")
 	if err := s.git("commit", "-q", "-m", msg); err != nil {
 		return false, fmt.Errorf("git commit: %w", err)
 	}
 	return true, nil
+}
+
+// previewLine picks a short, human-recognizable snippet for the commit
+// message — the point of it is browsability: scanning `git log` (or the
+// app's history picker) for "that thing about the car insurance" only works
+// if the message carries actual content, not just a timestamp.
+func previewLine(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		const maxRunes = 60
+		if utf8.RuneCountInString(line) > maxRunes {
+			r := []rune(line)
+			return string(r[:maxRunes]) + "…"
+		}
+		return line
+	}
+	return "(empty)"
+}
+
+// Commit is one point in the note's history.
+type Commit struct {
+	Hash    string
+	Time    time.Time
+	Message string
+}
+
+// Log returns every commit touching the note file, newest first.
+func (s *Store) Log() ([]Commit, error) {
+	const sep = "\x1f" // unit separator: won't collide with real message text
+	out, err := s.gitOutput("log", "--format=%H"+sep+"%cI"+sep+"%s", "--", fileName)
+	if err != nil {
+		// A brand new repo with no commits yet exits non-zero here; that's
+		// an empty history, not a failure.
+		if strings.TrimSpace(out) == "" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("git log: %w", err)
+	}
+
+	var commits []Commit
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, sep, 3)
+		if len(parts) != 3 {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, parts[1])
+		if err != nil {
+			continue
+		}
+		commits = append(commits, Commit{Hash: parts[0], Time: t, Message: parts[2]})
+	}
+	return commits, nil
+}
+
+// ShowAt returns the note's content exactly as it was at the given commit.
+func (s *Store) ShowAt(hash string) (string, error) {
+	out, err := s.gitOutput("show", hash+":"+fileName)
+	if err != nil {
+		return "", fmt.Errorf("git show: %w", err)
+	}
+	return out, nil
+}
+
+// RestoreAt makes the content at the given commit current again — writing
+// it to the live file and creating a new commit on top, same as any other
+// edit. Nothing from history is ever rewritten or lost: the state right
+// before a restore stays reachable in the log like any other past version.
+func (s *Store) RestoreAt(hash string, at time.Time) error {
+	content, err := s.ShowAt(hash)
+	if err != nil {
+		return err
+	}
+	if err := s.Save(content); err != nil {
+		return err
+	}
+	msg := fmt.Sprintf("restore from %s (%s): %s", shortHash(hash), at.Format("2006-01-02 15:04"), previewLine(content))
+	_, err = s.commitWithMessage(msg)
+	return err
+}
+
+func shortHash(hash string) string {
+	if len(hash) > 8 {
+		return hash[:8]
+	}
+	return hash
 }
 
 // ensureIdentity sets a local commit identity when the user has none

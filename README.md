@@ -18,6 +18,14 @@ editor.
   local git repo, so the file's history is just `git log` /
   `git show <rev>:working-memory.txt` away. No custom diffing engine — real
   git, real commits.
+- **Time machine (`Ctrl+R`)**: a searchable, fuzzy-filterable list of every
+  past version (each commit's message is a preview of its content, not just
+  a timestamp — that's what makes scanning history actually work). Pick one
+  to view it read-only; select text with the mouse and `Super+C`/`Ctrl+Y`
+  copy it out same as ever, since it's still just a real terminal. `r`
+  restores that whole version to the present as a new commit — nothing is
+  ever destructively lost, since the state right before a restore is itself
+  still in the log, restorable the same way.
 
 ## Install
 
@@ -37,11 +45,25 @@ icon via `omarchy bar put`.
 |----------------------|------------------------------------|
 | `Super+V` / `Ctrl+V` | Paste system clipboard at cursor  |
 | `Super+C` / `Ctrl+Y` | Copy the whole buffer to clipboard |
+| `Ctrl+R`             | Open history (time machine)       |
 | `Ctrl+S`             | Save + commit immediately         |
 | `Ctrl+Q`             | Save + commit, then quit          |
 
 Otherwise it's a normal text area (arrows, backspace, word-jump with
 `Alt+Left/Right`, etc. — see `github.com/charmbracelet/bubbles/textarea`).
+
+### History (`Ctrl+R`)
+
+| Key       | Where           | Action                          |
+|-----------|-----------------|----------------------------------|
+| `↑`/`↓`   | list            | move through past versions       |
+| `/`       | list            | fuzzy-filter by content preview  |
+| `Enter`   | list            | view the selected version        |
+| `Esc`     | list            | back to editing                  |
+| `Esc`     | viewing         | back to the list                 |
+| `r`       | viewing         | restore this version to the present |
+| `Super+C`/`Ctrl+Y` | viewing | select-and-copy, or copy the whole version |
+| `Ctrl+R`  | list or viewing | straight back to editing         |
 
 ## Data
 
@@ -93,13 +115,17 @@ auto-commit ~20s after that (or immediately on `Ctrl+S` / quit).
   ever inserting characters (an easy one to miss, since paste — which
   mutates the buffer directly via `InsertString`, bypassing focus entirely —
   still works fine). Focus in `New()` instead, before the model is built.
+- **`list.Model.SetSize` panics if called before the list was ever built
+  via `list.New(...)`** — including on its zero value. `Model.Update`'s
+  `WindowSizeMsg` case calls it unconditionally (history can be opened at
+  any time), so `New()` must construct `historyList` up front, not leave it
+  as a zero-value field waiting for `Ctrl+R` to fill in.
 
 ## Roadmap
 
 - Daily rotation / "show me the last few days" browsing.
-- An in-app history view (`git log` browsing without leaving the TUI).
 - Branching off a note for a side train of thought.
 
-The git-backed storage is deliberately already shaped for these — they're
-just UI on top of `git log`, `git show`, and `git branch` against the same
-repo.
+The git-backed storage was deliberately shaped for these from the start —
+they're just more UI on top of the same `git log`/`git show`/`git branch`
+the history picker (`Ctrl+R`) already uses.

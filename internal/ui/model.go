@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -24,10 +26,20 @@ const (
 
 type tickMsg time.Time
 
+// mode selects which of the app's three screens Update/View dispatch to.
+type mode int
+
+const (
+	modeEdit        mode = iota
+	modeHistoryList      // browsing the commit log
+	modeHistoryView      // read-only look at one past version
+)
+
 // Model is the top-level Bubble Tea model for the app.
 type Model struct {
 	ta    textarea.Model
 	store *store.Store
+	mode  mode
 
 	width, height int
 
@@ -37,6 +49,15 @@ type Model struct {
 	status        string
 	statusExpires time.Time
 	err           error
+
+	// History browsing (Ctrl+R). historyList is the commit picker;
+	// historyView is a read-only look at the selected commit's content.
+	// historySelected is what historyView is currently showing, kept
+	// around so "restore" (in history.go) knows what to restore.
+	historyList     list.Model
+	historyView     viewport.Model
+	historyContent  string // full text at historySelected — viewport.View() only has the visible slice
+	historySelected store.Commit
 }
 
 // New builds the initial model, loading existing content from s.
@@ -58,7 +79,12 @@ func New(s *store.Store) Model {
 	// stay unfocused, silently swallowing every typed character.
 	ta.Focus()
 
-	return Model{ta: ta, store: s, err: err}
+	// Never left as the zero value: list.Model.SetSize (called on every
+	// WindowSizeMsg, since history can be opened at any time) panics inside
+	// bubbles/list's pagination code when called on an uninitialized list.
+	historyList := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+
+	return Model{ta: ta, store: s, err: err, historyList: historyList}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -75,13 +101,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.ta.SetWidth(msg.Width)
 		m.ta.SetHeight(msg.Height - 2) // leave room for the footer
+		m.historyList.SetSize(msg.Width, msg.Height-2)
+		m.historyView.Width, m.historyView.Height = msg.Width, msg.Height-2
 		return m, nil
 
+	case tickMsg:
+		if m.mode == modeEdit {
+			m.onTick()
+		}
+		return m, tick()
+	}
+
+	switch m.mode {
+	case modeHistoryList:
+		return m.updateHistoryList(msg)
+	case modeHistoryView:
+		return m.updateHistoryView(msg)
+	}
+
+	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "ctrl+q":
 			m.flush()
 			return m, tea.Quit
+
+		case "ctrl+r":
+			return m.openHistory()
 
 		case "ctrl+s":
 			m.flush()
@@ -131,12 +177,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ta, cmd = m.ta.Update(msg)
 		m.markDirty()
 		return m, cmd
-
-	case tickMsg:
-		m.onTick()
-		return m, tick()
 	}
 
+	// Non-key messages (cursor blink, etc.) still need to reach the
+	// textarea in edit mode.
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
 	return m, cmd
@@ -196,7 +240,30 @@ var (
 )
 
 func (m Model) View() string {
-	hints := "super+v/ctrl+v paste · super+c/ctrl+y copy all · ctrl+s save · ctrl+q quit"
+	switch m.mode {
+	case modeHistoryList:
+		return m.viewHistoryList()
+	case modeHistoryView:
+		return m.viewHistoryView()
+	default:
+		return m.viewEdit()
+	}
+}
+
+// renderFooter lays out the one-line hint bar shared by every screen: left
+// side static key hints, right side a short status word, padded to fill
+// the width in between.
+func (m Model) renderFooter(hints, right string) string {
+	footer := footerStyle.Render(hints)
+	pad := m.width - lipgloss.Width(footer) - lipgloss.Width(right)
+	if pad < 1 {
+		pad = 1
+	}
+	return footer + fmt.Sprintf("%*s", pad, "") + right
+}
+
+func (m Model) viewEdit() string {
+	hints := "super+v/ctrl+v paste · super+c/ctrl+y copy all · ctrl+r history · ctrl+s save · ctrl+q quit"
 
 	var right string
 	switch {
@@ -212,12 +279,5 @@ func (m Model) View() string {
 		right = footerStyle.Render("synced")
 	}
 
-	footer := footerStyle.Render(hints)
-	pad := m.width - lipgloss.Width(footer) - lipgloss.Width(right)
-	if pad < 1 {
-		pad = 1
-	}
-	footerLine := footer + fmt.Sprintf("%*s", pad, "") + right
-
-	return m.ta.View() + "\n" + footerLine
+	return m.ta.View() + "\n" + m.renderFooter(hints, right)
 }
