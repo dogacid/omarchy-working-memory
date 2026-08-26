@@ -112,6 +112,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.setStatus("copied everything to clipboard")
 			return m, nil
+
+		// bubbles/textarea has no handling for Tab at all - it isn't in its
+		// KeyMap and isn't a KeyRunes message, so it's silently dropped.
+		// Insert a literal tab character ourselves.
+		case "tab":
+			m.ta.InsertRune('\t')
+			m.markDirty()
+			return m, nil
 		}
 
 		var cmd tea.Cmd

@@ -8,7 +8,14 @@
 # trigger the exact same show/hide behavior.
 set -euo pipefail
 
-APP_ID="omarchy-working-memory"
+# org.omarchy.* rather than a bare name: Omarchy's own terminal-tag rule
+# (default/hypr/apps/terminals.lua) matches window class against a fixed
+# list that includes this pattern specifically so Omarchy-launched TUIs get
+# tagged "terminal". Without that tag, Super+V/Super+C fall back to sending
+# literal Ctrl+V/Ctrl+C instead of Shift+Insert/Ctrl+Insert — which, bound
+# to quit in this app, made Super+C look like it was closing the window
+# instead of copying.
+APP_ID="org.omarchy.working-memory"
 WORKSPACE="working-memory"
 
 # Resolve through the symlink (this script is installed as a symlink into
