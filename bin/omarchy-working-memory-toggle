@@ -1,0 +1,34 @@
+#!/bin/bash
+# Show/hide the working-memory scratchpad: a floating terminal running the
+# omarchy-working-memory TUI, parked on its own Hyprland special workspace
+# so toggling hides it instead of closing it (state, including whatever is
+# unsaved in the buffer, is preserved between toggles).
+#
+# Bound to both the Super+N keybinding and the bar icon click, so both
+# trigger the exact same show/hide behavior.
+set -euo pipefail
+
+APP_ID="omarchy-working-memory"
+WORKSPACE="working-memory"
+
+is_running() {
+  hyprctl clients -j | jq -e --arg c "$APP_ID" '.[] | select(.class == $c)' >/dev/null 2>&1
+}
+
+if is_running; then
+  hyprctl dispatch togglespecialworkspace "$WORKSPACE" >/dev/null
+  exit 0
+fi
+
+omarchy-launch-tui --app-id="$APP_ID" omarchy-working-memory &
+
+# Poll briefly for the window to map, then reveal its special workspace.
+# (The window rule sends it there silently, so the very first launch would
+# otherwise start invisible.)
+for _ in $(seq 1 40); do
+  if is_running; then
+    hyprctl dispatch togglespecialworkspace "$WORKSPACE" >/dev/null
+    exit 0
+  fi
+  sleep 0.05
+done

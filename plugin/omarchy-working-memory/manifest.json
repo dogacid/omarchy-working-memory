@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "omarchy-working-memory",
+  "name": "Working Memory",
+  "version": "1.0.0",
+  "author": "Marc Galbraith",
+  "license": "MIT",
+  "description": "Top-bar toggle for a plain-text scratchpad (a git-versioned working-memory.txt), toggled from the bar or Super+N.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Working Memory",
+    "description": "Toggle the working-memory scratchpad",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}
