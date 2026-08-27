@@ -7,9 +7,11 @@ things to paste back out later, without breaking your flow to open a full
 editor. Built with Qt Quick and C++, in the same stack as
 [omawrite](https://github.com/omacom-io/omawrite) and Omarchy's own shell.
 
-- **Toggle from anywhere**: `Super+N` or click the bar icon. It shows/hides
-  a floating window via a dedicated Hyprland special workspace — closing it
-  just hides it, so whatever's unsaved stays put.
+- **Open/focus from anywhere**: `Super+N` or click the bar icon. A plain
+  floating window — drag it, resize it, put it beside whatever you're
+  actually working on. It's meant to sit alongside other windows for
+  anywhere from a few seconds to several minutes, not be hidden behind an
+  overlay; close it normally (`Super+W`) when you're done with it.
 - **Plain text**, not markdown. No formatting to fight with.
 - **Real, native text selection**: it's a real `TextArea`, so `Shift`+arrows,
   double/triple-click, click-and-drag — all of it works exactly like every
@@ -121,13 +123,19 @@ first run.
   without acting. The working form is
   `hyprctl eval 'hl.dispatch(hl.dsp.<category>.<action>(...))'` (see
   `bin/omarchy-working-memory-toggle`'s `reveal()`).
-- **`hl.dsp.workspace.toggle_special` only changes visibility, not
-  keyboard focus.** Without an explicit follow-up focus call, `Super+N`
-  would show the scratchpad while keystrokes kept going to whatever was
-  focused before the toggle. The follow-up focus call has to be
-  conditional, though: focusing a window on a special workspace implicitly
-  *reveals* that workspace, so calling it unconditionally after
-  `toggle_special` would undo every hide immediately after it happened.
+- **A Hyprland special workspace is the wrong tool for a window meant to
+  sit alongside others.** The first version parked the scratchpad on one
+  (toggled via `hl.dsp.workspace.toggle_special`) so `Super+N` could
+  hide/show it as a unit. But a special workspace is an overlay that sits
+  on top of and blocks interaction with whatever's underneath until it's
+  explicitly dismissed — confirmed directly: after copying text, moving
+  the mouse over another window and clicking couldn't refocus it at all,
+  because the scratchpad was still covering it; the only way out was to
+  close the scratchpad, which then broke the very copy that was just made
+  (a Wayland clipboard's data source has to stay alive for paste to work).
+  `bin/omarchy-working-memory-toggle` now just launches the app (a plain
+  floating window, per the window rule above) or focuses it if already
+  running — no special workspace involved.
 - **Don't use an `org.omarchy.*` class/app-id for a non-terminal app.**
   Omarchy's terminal-tag rule (`apps/terminals.lua`) matches that prefix
   unconditionally to tag Omarchy-launched TUIs as terminals, which makes

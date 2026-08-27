@@ -1,68 +1,29 @@
 #!/bin/bash
-# Show/hide the working-memory scratchpad: a floating Qt window parked on
-# its own Hyprland special workspace so toggling hides it instead of
-# closing it (state, including whatever is unsaved in the buffer, is
-# preserved between toggles).
+# Launch (or focus, if already running) the working-memory scratchpad — a
+# plain floating window, not a Hyprland special workspace: it's meant to
+# sit alongside whatever else you're doing for anywhere from a few seconds
+# to several minutes, not be hidden behind an overlay you have to dismiss
+# to reach anything else. Close it normally (Super+W) when you're done.
 #
 # Bound to both the Super+N keybinding and the bar icon click, so both
-# trigger the exact same show/hide behavior.
+# trigger the exact same behavior.
 set -euo pipefail
 
 APP_ID="omarchy-working-memory"
-WORKSPACE="working-memory"
 BIN="$(command -v omarchy-working-memory || echo "$HOME/.local/bin/omarchy-working-memory")"
 
 is_running() {
   hyprctl clients -j | jq -e --arg c "$APP_ID" '.[] | select(.class == $c)' >/dev/null 2>&1
 }
 
-# True only once the window rule has actually parked it on the special
-# workspace — not just once the window exists. There's a brief gap between
-# the window mapping (is_running becomes true) and Hyprland applying the
-# `workspace = special:... silent` rule; toggling before that gap closes
-# would reveal the special workspace while it's still empty.
-on_special_workspace() {
-  hyprctl clients -j | jq -e --arg c "$APP_ID" --arg w "special:$WORKSPACE" \
-    '.[] | select(.class == $c and .workspace.name == $w)' >/dev/null 2>&1
-}
-
-# True once any monitor is actually showing the special workspace (as
-# opposed to just containing a window parked on it, which is true whether
-# or not it's currently visible — the client's own `hidden` field doesn't
-# change when a special workspace is toggled, only `monitors[].specialWorkspace` does).
-special_workspace_visible() {
-  hyprctl monitors -j | jq -e --arg w "special:$WORKSPACE" \
-    '.[] | select(.specialWorkspace.name == $w)' >/dev/null 2>&1
-}
-
-reveal() {
+if is_running; then
   # This system's Hyprland build (Omarchy's Lua-config fork) routes CLI
   # dispatches through `hyprctl eval` + hl.dispatch/hl.dsp.* rather than the
   # classic `hyprctl dispatch <name> <args>` form — that form is silently
   # rejected here (prints a Lua parse error but still exits 0).
-  hyprctl eval "hl.dispatch(hl.dsp.workspace.toggle_special(\"$WORKSPACE\"))" >/dev/null
-  # toggle_special only changes which workspace is *visible* — it doesn't
-  # move keyboard focus. Only focus when the toggle just *showed* the
-  # workspace: focusing a window on a special workspace implicitly reveals
-  # it too, so calling this unconditionally after a hiding toggle would
-  # immediately re-show it, making hide never work.
-  if special_workspace_visible; then
-    hyprctl eval "hl.dispatch(hl.dsp.focus({ window = \"class:^($APP_ID)\$\" }))" >/dev/null
-  fi
-}
-
-if is_running; then
-  reveal
+  hyprctl eval "hl.dispatch(hl.dsp.focus({ window = \"class:^($APP_ID)\$\" }))" >/dev/null
   exit 0
 fi
 
 setsid "$BIN" >/dev/null 2>&1 &
 disown
-
-for _ in $(seq 1 40); do
-  if on_special_workspace; then
-    reveal
-    exit 0
-  fi
-  sleep 0.05
-done
