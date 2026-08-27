@@ -5,6 +5,8 @@ package ui
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -25,6 +27,9 @@ const (
 )
 
 type tickMsg time.Time
+
+// editorFinishedMsg reports the result of a Ctrl+E trip out to $EDITOR.
+type editorFinishedMsg struct{ err error }
 
 // mode selects which of the app's three screens Update/View dispatch to.
 type mode int
@@ -72,6 +77,9 @@ func New(s *store.Store) Model {
 	content, err := s.Load()
 	if err == nil {
 		ta.SetValue(content)
+		// SetValue leaves the cursor at (0,0); land where you left off
+		// instead of at the top of yesterday's notes.
+		ta.CursorEnd()
 	}
 	// Must happen here, not in Init(): Init has a value receiver, so any
 	// mutation of m.ta made there (Focus() included) is applied to a local
@@ -110,6 +118,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.onTick()
 		}
 		return m, tick()
+
+	case editorFinishedMsg:
+		return m.editorFinished(msg.err)
 	}
 
 	switch m.mode {
@@ -128,6 +139,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "ctrl+r":
 			return m.openHistory()
+
+		// Bubbles/textarea has no concept of a text selection at all — no
+		// shift-arrow, no visual mode — so there's nothing in-app to hook
+		// keyboard-driven selection onto. Rather than reimplement a worse
+		// version of what's already sitting on this machine, hand the real
+		// file to a real editor: flush first so it's current on disk, then
+		// pause the TUI and give the terminal to $EDITOR (nvim by default,
+		// LazyVim config and all) via tea.ExecProcess — the same mechanism
+		// git/ranger/lf use. Resumes and reloads once it exits.
+		case "ctrl+e":
+			m.flush()
+			return m, m.openEditor()
 
 		case "ctrl+s":
 			m.flush()
@@ -233,6 +256,44 @@ func (m *Model) flush() {
 	m.uncommitted = false
 }
 
+// openEditor suspends the program and hands the terminal to $EDITOR (nvim
+// if unset) on the store's actual file, so selection, visual mode, yank,
+// registers, macros — all of it — are genuinely nvim's, not a reimplementation.
+func (m Model) openEditor() tea.Cmd {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "nvim"
+	}
+	cmd := exec.Command(editor, m.store.Path())
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return editorFinishedMsg{err: err}
+	})
+}
+
+// editorFinished reloads whatever $EDITOR left on disk and commits it, so a
+// Ctrl+E trip shows up in history (Ctrl+R) same as any other edit.
+func (m Model) editorFinished(err error) (tea.Model, tea.Cmd) {
+	if err != nil {
+		m.err = err
+		return m, nil
+	}
+	content, loadErr := m.store.Load()
+	if loadErr != nil {
+		m.err = loadErr
+		return m, nil
+	}
+	m.ta.SetValue(content)
+	m.ta.CursorEnd()
+	m.unsaved, m.err = false, nil
+	if _, commitErr := m.store.Commit(); commitErr != nil {
+		m.err = commitErr
+	} else {
+		m.uncommitted = false
+	}
+	m.setStatus("back from editor")
+	return m, nil
+}
+
 var (
 	footerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
@@ -263,7 +324,7 @@ func (m Model) renderFooter(hints, right string) string {
 }
 
 func (m Model) viewEdit() string {
-	hints := "super+v/ctrl+v paste · super+c/ctrl+y copy all · ctrl+r history · ctrl+s save · ctrl+q quit"
+	hints := "super+v/ctrl+v paste · super+c/ctrl+y copy all · ctrl+e edit in $EDITOR · ctrl+r history · ctrl+s save · ctrl+q quit"
 
 	var right string
 	switch {

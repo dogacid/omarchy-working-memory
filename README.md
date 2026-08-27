@@ -26,6 +26,12 @@ editor.
   restores that whole version to the present as a new commit — nothing is
   ever destructively lost, since the state right before a restore is itself
   still in the log, restorable the same way.
+- **`Ctrl+E` drops you into real `$EDITOR`** (nvim by default) on the actual
+  note file — full LazyVim, real visual-mode selection, yank to the system
+  clipboard, macros, all of it. `bubbles/textarea` has no selection concept
+  at all to build keyboard selection on top of, so rather than reimplement a
+  worse version of an editor you already know, this just hands the terminal
+  over to the real one and reloads when it exits.
 
 ## Install
 
@@ -45,6 +51,7 @@ icon via `omarchy bar put`.
 |----------------------|------------------------------------|
 | `Super+V` / `Ctrl+V` | Paste system clipboard at cursor  |
 | `Super+C` / `Ctrl+Y` | Copy the whole buffer to clipboard |
+| `Ctrl+E`              | Edit in `$EDITOR` (nvim), for real selection/visual mode |
 | `Ctrl+R`             | Open history (time machine)       |
 | `Ctrl+S`             | Save + commit immediately         |
 | `Ctrl+Q`             | Save + commit, then quit          |
@@ -120,6 +127,19 @@ auto-commit ~20s after that (or immediately on `Ctrl+S` / quit).
   `WindowSizeMsg` case calls it unconditionally (history can be opened at
   any time), so `New()` must construct `historyList` up front, not leave it
   as a zero-value field waiting for `Ctrl+R` to fill in.
+- **`textarea.SetValue` leaves the cursor at (0,0)**, not at the end of the
+  text it just set — so loading existing content and skipping `CursorEnd()`
+  lands you on the top line of yesterday's notes every time the app opens.
+- **`bubbles/textarea` has no selection concept whatsoever** — no
+  shift-arrow, no visual mode, nothing to hook a "copy the selection" command
+  onto. `Ctrl+E` sidesteps this entirely rather than reimplementing it: flush
+  to disk, then `tea.ExecProcess` hands the whole terminal to `$EDITOR` on
+  the real file (same trick `git commit`, `ranger`, `lf` use), and the buffer
+  reloads once it exits. Considered `github.com/kujtimiihoxha/vimtea` (an
+  in-process vim-mode emulation component) instead, but it's early-stage
+  (~15 commits) with an undocumented clipboard hook and expects to own the
+  whole `tea.Program` rather than being embedded in ours — not worth the
+  risk after how much the Super+C/Super+V integration already cost.
 
 ## Roadmap
 
