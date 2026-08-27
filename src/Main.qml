@@ -126,7 +126,13 @@ ApplicationWindow {
             spacing: 0
 
             ColumnLayout {
+                // min == max == preferred: genuinely fixed, not just a
+                // suggestion RowLayout can override if a child's content
+                // pushes back (that's what let long commit messages drag
+                // this pane wider — see the delegate below).
                 Layout.preferredWidth: 300
+                Layout.minimumWidth: 300
+                Layout.maximumWidth: 300
                 Layout.fillHeight: true
                 spacing: 0
 
@@ -158,10 +164,21 @@ ApplicationWindow {
                         background: Rectangle {
                             color: highlighted ? backend.themeSelection : "transparent"
                         }
-                        contentItem: ColumnLayout {
+                        // A plain Column with an explicit width, not a
+                        // ColumnLayout, and each Text's width set directly
+                        // rather than via Layout.fillWidth: a ColumnLayout
+                        // used as a Control's contentItem doesn't reliably
+                        // inherit the control's width, so elide had nothing
+                        // to elide against — a long message rendered at
+                        // full length, which widened this row's (and so
+                        // the whole list's) implicit width, which is what
+                        // was dragging the list/preview divider around
+                        // depending on which row was selected.
+                        contentItem: Column {
+                            width: historyList.width - 24
                             spacing: 2
                             Text { text: modelData.time; color: backend.themeForeground; font.bold: true }
-                            Text { text: modelData.message; color: backend.themeMuted; elide: Text.ElideRight; Layout.fillWidth: true }
+                            Text { text: modelData.message; color: backend.themeMuted; elide: Text.ElideRight; width: parent.width }
                         }
                     }
 
