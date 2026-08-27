@@ -13,8 +13,8 @@ ApplicationWindow {
     title: "Working memory"
     color: backend.themeBackground
 
-    // "edit" | "history" | "historyView" — the error overlay is independent
-    // of this and just layers on top whenever backend.lastError is set.
+    // The error overlay is independent of this and just layers on top
+    // whenever backend.lastError is set.
     property string mode: "edit"
     property var historyEntries: []
     property var filteredHistory: []
@@ -28,24 +28,32 @@ ApplicationWindow {
         filteredHistory = historyEntries;
         historySearch.text = "";
         mode = "history";
+        historyList.currentIndex = historyEntries.length > 0 ? 0 : -1;
+        showSelected();
         historyList.forceActiveFocus();
     }
 
     function filterHistory(query) {
-        if (!query) {
-            filteredHistory = historyEntries;
-            return;
-        }
-        const q = query.toLowerCase();
-        filteredHistory = historyEntries.filter(function (e) {
-            return e.message.toLowerCase().indexOf(q) !== -1;
-        });
+        filteredHistory = query
+            ? historyEntries.filter(function (e) { return e.message.toLowerCase().indexOf(query.toLowerCase()) !== -1; })
+            : historyEntries;
+        historyList.currentIndex = filteredHistory.length > 0 ? 0 : -1;
+        showSelected();
     }
 
-    function openHistoryEntry(entry) {
+    // Following the list's current row live, not waiting for Enter, is the
+    // point: skimming through many versions to find the right one reads as
+    // one continuous motion instead of "select, view, back, select, view…".
+    function showSelected() {
+        const entry = historyList.currentIndex >= 0 ? filteredHistory[historyList.currentIndex] : null;
         selectedEntry = entry;
-        historyContent = backend.showAt(entry.hash);
-        mode = "historyView";
+        historyContent = entry ? backend.showAt(entry.hash) : "";
+    }
+
+    function restoreSelected() {
+        if (!win.selectedEntry) return;
+        backend.restoreAt(win.selectedEntry.hash, win.selectedEntry.isoTime);
+        win.backToEdit();
     }
 
     function backToEdit() {
@@ -58,10 +66,7 @@ ApplicationWindow {
     // real shift-arrow/word/mouse selection built in.
     Shortcut { sequence: "Ctrl+S"; enabled: win.mode === "edit"; onActivated: backend.save() }
     Shortcut { sequence: "Ctrl+R"; onActivated: win.mode === "edit" ? win.openHistory() : win.backToEdit() }
-    Shortcut { sequence: "Escape"; enabled: win.mode !== "edit"; onActivated: {
-        if (win.mode === "historyView") { win.mode = "history"; historyList.forceActiveFocus(); }
-        else win.backToEdit();
-    }}
+    Shortcut { sequence: "Escape"; enabled: win.mode !== "edit"; onActivated: win.backToEdit() }
 
     Connections {
         target: backend
@@ -110,81 +115,114 @@ ApplicationWindow {
             }
         }
 
-        // --- History list ---------------------------------------------
-        ColumnLayout {
+        // --- History: list on the left, live read-only preview on the
+        // right. The preview follows the list selection directly (no
+        // separate "open" step) since the point is skimming through many
+        // versions quickly to find one, not reading each in turn.
+        RowLayout {
             visible: win.mode === "history"
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 0
 
-            TextField {
-                id: historySearch
-                Layout.fillWidth: true
-                placeholderText: "Search history…"
-                color: backend.themeForeground
-                placeholderTextColor: backend.themeMuted
-                background: Rectangle { color: backend.themeSelection }
-                onTextChanged: win.filterHistory(text)
-                Keys.onDownPressed: historyList.forceActiveFocus()
+            ColumnLayout {
+                Layout.preferredWidth: 300
+                Layout.fillHeight: true
+                spacing: 0
+
+                TextField {
+                    id: historySearch
+                    Layout.fillWidth: true
+                    placeholderText: "Search history…"
+                    color: backend.themeForeground
+                    placeholderTextColor: backend.themeMuted
+                    background: Rectangle { color: backend.themeSelection }
+                    onTextChanged: win.filterHistory(text)
+                    Keys.onDownPressed: historyList.forceActiveFocus()
+                }
+
+                ListView {
+                    id: historyList
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    model: win.filteredHistory
+                    clip: true
+                    keyNavigationEnabled: true
+                    highlightMoveDuration: 60
+                    onCurrentIndexChanged: win.showSelected()
+
+                    delegate: ItemDelegate {
+                        width: historyList.width
+                        highlighted: ListView.isCurrentItem
+                        onClicked: historyList.currentIndex = index
+                        background: Rectangle {
+                            color: highlighted ? backend.themeSelection : "transparent"
+                        }
+                        contentItem: ColumnLayout {
+                            spacing: 2
+                            Text { text: modelData.time; color: backend.themeForeground; font.bold: true }
+                            Text { text: modelData.message; color: backend.themeMuted; elide: Text.ElideRight; Layout.fillWidth: true }
+                        }
+                    }
+
+                    Keys.onReturnPressed: win.restoreSelected()
+                    Keys.onEnterPressed: win.restoreSelected()
+                }
             }
 
-            ListView {
-                id: historyList
+            Rectangle { Layout.fillHeight: true; width: 1; color: backend.themeMuted; opacity: 0.3 }
+
+            // Right pane: a title strip naming exactly which version this is
+            // (the clearest possible "you are not editing the live note"
+            // cue) over the read-only content itself.
+            ColumnLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                model: win.filteredHistory
-                clip: true
-                keyNavigationEnabled: true
-                highlightMoveDuration: 60
-                currentIndex: count > 0 ? 0 : -1
+                spacing: 0
 
-                delegate: ItemDelegate {
-                    width: historyList.width
-                    highlighted: ListView.isCurrentItem
-                    onClicked: { historyList.currentIndex = index; win.openHistoryEntry(modelData); }
-                    background: Rectangle {
-                        color: highlighted ? backend.themeSelection : "transparent"
-                    }
-                    contentItem: ColumnLayout {
-                        spacing: 2
-                        Text { text: modelData.time; color: backend.themeForeground; font.bold: true }
-                        Text { text: modelData.message; color: backend.themeMuted; elide: Text.ElideRight; Layout.fillWidth: true }
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 36
+                    color: backend.themeSelection
+                    visible: win.selectedEntry !== null
+
+                    Text {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 16
+                        anchors.right: parent.right
+                        anchors.rightMargin: 12
+                        color: backend.themeForeground
+                        font.bold: true
+                        elide: Text.ElideRight
+                        text: win.selectedEntry ? ("Read-only — " + win.selectedEntry.time) : ""
                     }
                 }
 
-                Keys.onReturnPressed: if (currentItem) win.openHistoryEntry(filteredHistory[currentIndex])
-                Keys.onEnterPressed: if (currentItem) win.openHistoryEntry(filteredHistory[currentIndex])
-            }
-        }
+                ScrollView {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
 
-        // --- History preview (read-only) -------------------------------
-        ScrollView {
-            visible: win.mode === "historyView"
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-
-            TextArea {
-                readOnly: true
-                selectByMouse: true
-                persistentSelection: true
-                wrapMode: TextArea.Wrap
-                text: win.historyContent
-                font.family: "monospace"
-                font.pixelSize: 15
-                color: backend.themeForeground
-                selectionColor: backend.themeSelection
-                selectedTextColor: backend.themeForeground
-                background: null
-                topPadding: 12
-                leftPadding: 16
-                rightPadding: 16
-                bottomPadding: 12
-
-                Keys.onPressed: function (event) {
-                    if (event.key === Qt.Key_R && win.selectedEntry) {
-                        backend.restoreAt(win.selectedEntry.hash, win.selectedEntry.isoTime);
-                        win.backToEdit();
-                        event.accepted = true;
+                    TextArea {
+                        readOnly: true
+                        selectByMouse: true
+                        persistentSelection: true
+                        wrapMode: TextArea.Wrap
+                        text: win.historyContent
+                        font.family: "monospace"
+                        font.pixelSize: 15
+                        color: backend.themeForeground
+                        selectionColor: backend.themeSelection
+                        selectedTextColor: backend.themeForeground
+                        // A faint tint (not a loud color change) is the
+                        // secondary read-only cue — the title strip above
+                        // and the list beside it already make the mode
+                        // unambiguous, so this stays subtle.
+                        background: Rectangle { color: Qt.darker(backend.themeBackground, 1.08) }
+                        topPadding: 12
+                        leftPadding: 16
+                        rightPadding: 16
+                        bottomPadding: 12
                     }
                 }
             }
@@ -206,19 +244,14 @@ ApplicationWindow {
                     color: backend.themeMuted
                     font.pixelSize: 12
                     elide: Text.ElideRight
-                    text: {
-                        if (win.mode === "edit")
-                            return "ctrl+r history · ctrl+s save · select text + ctrl+c/super+c to copy";
-                        if (win.mode === "history")
-                            return "↑/↓ move · enter view · esc back";
-                        return "r restore to present · esc back · ctrl+r editing";
-                    }
+                    text: win.mode === "edit"
+                        ? "ctrl+r history · ctrl+s save · select text + ctrl+c/super+c to copy"
+                        : "type to search · ↑/↓ move · enter restore · esc back to editing"
                 }
                 Text {
                     color: backend.themeAccent
                     font.pixelSize: 12
-                    text: win.mode === "edit" ? backend.status
-                        : (win.mode === "historyView" && win.selectedEntry ? win.selectedEntry.time : "")
+                    text: win.mode === "edit" ? backend.status : ""
                 }
             }
         }

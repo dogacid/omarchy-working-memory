@@ -23,13 +23,14 @@ editor. Built with Qt Quick and C++, in the same stack as
   local git repo, so the file's history is just `git log` /
   `git show <rev>:working-memory.txt` away. No custom diffing engine — real
   git, real commits.
-- **Time machine (`Ctrl+R`)**: a searchable list of every past version (each
-  commit's message is a preview of its content, not just a timestamp — that's
-  what makes scanning history actually work). Pick one to view it read-only;
-  select text and `Ctrl+C`/`Super+C` copy it out same as ever. `r` restores
-  that whole version to the present as a new commit — nothing is ever
-  destructively lost, since the state right before a restore is itself still
-  in the log, restorable the same way.
+- **Time machine (`Ctrl+R`)**: a searchable list of every past version on the
+  left, its full text read-only on the right — the preview follows the list
+  as you move through it, so skimming many versions to find one is one
+  continuous motion, not select-view-back-select-view. Select text and
+  `Ctrl+C`/`Super+C` copy it out same as ever; `Enter` restores that whole
+  version to the present as a new commit — nothing is ever destructively
+  lost, since the state right before a restore is itself still in the log,
+  restorable the same way.
 - **Follows Omarchy's live theme**: background/foreground/accent/selection
   colors and dark/light mode are read straight from
   `~/.local/state/omarchy/current/theme/colors.toml` and update immediately
@@ -97,14 +98,20 @@ automatically ~1s after you stop typing, with a git commit ~20s after that.
 
 ### History (`Ctrl+R`)
 
-| Key            | Where           | Action                              |
-|-----------------|-----------------|---------------------------------------|
-| Type            | list            | filter by content preview             |
-| `↑`/`↓`, click  | list            | move through / open a past version    |
-| `Enter`         | list            | view the selected version             |
-| `Esc`           | either          | back (view → list → editing)          |
-| `r`             | viewing         | restore this version to the present   |
-| `Ctrl+C`/`Super+C` | viewing      | select-and-copy                       |
+A list of every past version on the left; the selected one's full text,
+read-only, on the right — following the list live, not waiting for
+`Enter`, since the point is skimming through many versions quickly to find
+one. A "Read-only — <date>" title strip above the preview and a faint
+background tint both make it unmistakable you're not looking at the live
+note.
+
+| Key                  | Action                                  |
+|-----------------------|-------------------------------------------|
+| Type                 | filter the list by content preview        |
+| `↑`/`↓`, click        | move through the list — preview updates live |
+| `Enter`               | restore the selected version to the present |
+| `Ctrl+C`/`Super+C`    | select text in the preview and copy it out |
+| `Esc`                 | back to editing                           |
 
 A save/commit failure (or a history operation failing) switches to a
 full-screen error view instead: `Esc`/`Enter` dismisses it, `Ctrl+C`/
