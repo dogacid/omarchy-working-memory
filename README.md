@@ -130,6 +130,18 @@ auto-commit ~20s after that (or immediately on `Ctrl+S` / quit).
 - **`textarea.SetValue` leaves the cursor at (0,0)**, not at the end of the
   text it just set — so loading existing content and skipping `CursorEnd()`
   lands you on the top line of yesterday's notes every time the app opens.
+- **`hl.dsp.workspace.toggle_special` only changes which special workspace is
+  *visible* — it never moves keyboard focus.** Without an explicit focus
+  call, Super+N would show the scratchpad on screen while keystrokes kept
+  going to whatever was focused a moment before (confirmed: `activewindow`
+  stayed the previous window after toggling). The fix,
+  `hl.dsp.focus({ window = "class:^(...)$" })`, has its own trap: focusing a
+  window that lives on a special workspace implicitly re-reveals that
+  workspace, so calling it unconditionally after `toggle_special` means a
+  *hiding* toggle gets immediately undone by the focus call right after it.
+  `bin/omarchy-working-memory-toggle`'s `reveal()` only focuses when
+  `monitors[].specialWorkspace.name` shows the workspace actually became
+  visible from this toggle — not when it just went into hiding.
 - **`bubbles/textarea` has no selection concept whatsoever** — no
   shift-arrow, no visual mode, nothing to hook a "copy the selection" command
   onto. `Ctrl+E` sidesteps this entirely rather than reimplementing it: flush
