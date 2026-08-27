@@ -12,6 +12,7 @@ import (
 )
 
 const fileName = "working-memory.txt"
+const errorLogName = "error.log"
 
 // Store owns the on-disk working-memory file and the git repo that
 // versions it.
@@ -49,7 +50,31 @@ func Open() (*Store, error) {
 		}
 	}
 
+	// So the error log (see LogError) and the atomic-save tmp file never
+	// show up as untracked cruft in this repo's own git status.
+	gitignore := filepath.Join(dir, ".gitignore")
+	if _, err := os.Stat(gitignore); os.IsNotExist(err) {
+		_ = os.WriteFile(gitignore, []byte(errorLogName+"\n*.tmp\n"), 0o644)
+	}
+
 	return s, nil
+}
+
+// LogPath returns where LogError writes, so the UI can tell the user where
+// to look if something goes wrong that even the in-app error view can't
+// show in full (e.g. the program crashing outright).
+func (s *Store) LogPath() string { return filepath.Join(s.dir, errorLogName) }
+
+// LogError appends err to the error log with a timestamp. Best-effort: a
+// failure to write the log itself isn't worth surfacing anywhere, since the
+// caller is already in an error path.
+func (s *Store) LogError(err error) {
+	f, ferr := os.OpenFile(s.LogPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if ferr != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s\t%v\n", time.Now().Format(time.RFC3339), err)
 }
 
 func dataDir() (string, error) {

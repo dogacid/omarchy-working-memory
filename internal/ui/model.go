@@ -38,6 +38,7 @@ const (
 	modeEdit        mode = iota
 	modeHistoryList      // browsing the commit log
 	modeHistoryView      // read-only look at one past version
+	modeError            // full-screen, scrollable, copyable look at the last error
 )
 
 // Model is the top-level Bubble Tea model for the app.
@@ -63,6 +64,13 @@ type Model struct {
 	historyView     viewport.Model
 	historyContent  string // full text at historySelected — viewport.View() only has the visible slice
 	historySelected store.Commit
+
+	// errorView shows the full text of the last error (see fail()) —
+	// scrollable and mouse-selectable, unlike the one-line footer status,
+	// which silently truncated/corrupted the display for anything longer
+	// than the terminal width (confirmed: a long editor error appeared as
+	// cut-off red text with nothing to select or copy).
+	errorView viewport.Model
 }
 
 // New builds the initial model, loading existing content from s.
@@ -92,7 +100,11 @@ func New(s *store.Store) Model {
 	// bubbles/list's pagination code when called on an uninitialized list.
 	historyList := list.New(nil, list.NewDefaultDelegate(), 0, 0)
 
-	return Model{ta: ta, store: s, err: err, historyList: historyList}
+	m := Model{ta: ta, store: s, historyList: historyList}
+	if err != nil {
+		m.fail(err)
+	}
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -111,6 +123,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ta.SetHeight(msg.Height - 2) // leave room for the footer
 		m.historyList.SetSize(msg.Width, msg.Height-2)
 		m.historyView.Width, m.historyView.Height = msg.Width, msg.Height-2
+		m.errorView.Width, m.errorView.Height = msg.Width, msg.Height-2
 		return m, nil
 
 	case tickMsg:
@@ -128,6 +141,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateHistoryList(msg)
 	case modeHistoryView:
 		return m.updateHistoryView(msg)
+	case modeError:
+		return m.updateError(msg)
 	}
 
 	switch msg := msg.(type) {
@@ -135,6 +150,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "ctrl+q":
 			m.flush()
+			if m.mode == modeError {
+				// Don't quit on top of a failed save/commit — that would
+				// throw away the error (and whatever couldn't be saved)
+				// with no chance to see why or retry.
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case "ctrl+r":
@@ -150,11 +171,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// git/ranger/lf use. Resumes and reloads once it exits.
 		case "ctrl+e":
 			m.flush()
+			if m.mode == modeError {
+				return m, nil
+			}
 			return m, m.openEditor()
 
 		case "ctrl+s":
 			m.flush()
-			m.setStatus("saved")
+			if m.mode != modeError {
+				m.setStatus("saved")
+			}
 			return m, nil
 
 		// Omarchy's Super+V/Super+C send Shift+Insert/Ctrl+Insert to
@@ -219,22 +245,33 @@ func (m *Model) setStatus(s string) {
 	m.statusExpires = time.Now().Add(statusDuration)
 }
 
+// fail switches to the full-screen error view and logs err to disk. Used
+// for anything serious enough to interrupt editing (save/commit/editor
+// failures) — as opposed to setStatus, which is for transient one-liners
+// like a single failed paste.
+func (m *Model) fail(err error) {
+	m.err = err
+	m.store.LogError(err)
+	m.errorView.SetContent(err.Error())
+	m.errorView.GotoTop()
+	m.mode = modeError
+}
+
 func (m *Model) onTick() {
 	now := time.Now()
 
 	if m.unsaved && now.Sub(m.lastEdit) >= saveDebounce {
 		if err := m.store.Save(m.ta.Value()); err != nil {
-			m.err = err
+			m.fail(err)
 		} else {
 			m.unsaved = false
 			m.uncommitted = true
-			m.err = nil
 		}
 	}
 
 	if m.uncommitted && !m.unsaved && now.Sub(m.lastEdit) >= commitDebounce {
 		if committed, err := m.store.Commit(); err != nil {
-			m.err = err
+			m.fail(err)
 		} else if committed {
 			m.uncommitted = false
 		}
@@ -245,12 +282,12 @@ func (m *Model) onTick() {
 // quit and on the explicit Ctrl+S save.
 func (m *Model) flush() {
 	if err := m.store.Save(m.ta.Value()); err != nil {
-		m.err = err
+		m.fail(err)
 		return
 	}
 	m.unsaved = false
 	if _, err := m.store.Commit(); err != nil {
-		m.err = err
+		m.fail(err)
 		return
 	}
 	m.uncommitted = false
@@ -274,22 +311,22 @@ func (m Model) openEditor() tea.Cmd {
 // Ctrl+E trip shows up in history (Ctrl+R) same as any other edit.
 func (m Model) editorFinished(err error) (tea.Model, tea.Cmd) {
 	if err != nil {
-		m.err = err
+		m.fail(err)
 		return m, nil
 	}
 	content, loadErr := m.store.Load()
 	if loadErr != nil {
-		m.err = loadErr
+		m.fail(loadErr)
 		return m, nil
 	}
 	m.ta.SetValue(content)
 	m.ta.CursorEnd()
-	m.unsaved, m.err = false, nil
+	m.unsaved = false
 	if _, commitErr := m.store.Commit(); commitErr != nil {
-		m.err = commitErr
-	} else {
-		m.uncommitted = false
+		m.fail(commitErr)
+		return m, nil
 	}
+	m.uncommitted = false
 	m.setStatus("back from editor")
 	return m, nil
 }
@@ -306,9 +343,46 @@ func (m Model) View() string {
 		return m.viewHistoryList()
 	case modeHistoryView:
 		return m.viewHistoryView()
+	case modeError:
+		return m.viewError()
 	default:
 		return m.viewEdit()
 	}
+}
+
+// updateError handles the full-screen error view: dismiss back to editing,
+// copy the error text out, or scroll it (viewport's own key handling) if
+// it's long enough to need it.
+func (m Model) updateError(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok {
+		switch key.String() {
+		case "esc", "enter":
+			m.err = nil
+			m.mode = modeEdit
+			return m, nil
+
+		case "ctrl+y":
+			if m.err != nil {
+				_ = clip.Copy(m.err.Error())
+				m.setStatus("copied error to clipboard")
+			}
+			return m, nil
+		}
+	}
+
+	var cmd tea.Cmd
+	m.errorView, cmd = m.errorView.Update(msg)
+	return m, cmd
+}
+
+func (m Model) viewError() string {
+	// Deliberately short and fixed-width on both sides: this is exactly the
+	// footer that corrupted the display in the first place when it tried to
+	// cram a long, variable-length error message into one line. The error
+	// text itself now lives in the scrollable body above, not here.
+	hints := "select+super+c/ctrl+y copy · esc/enter dismiss"
+	right := errStyle.Render("error (logged)")
+	return m.errorView.View() + "\n" + m.renderFooter(hints, right)
 }
 
 // renderFooter lays out the one-line hint bar shared by every screen: left
@@ -328,8 +402,6 @@ func (m Model) viewEdit() string {
 
 	var right string
 	switch {
-	case m.err != nil:
-		right = errStyle.Render(m.err.Error())
 	case m.status != "" && time.Now().Before(m.statusExpires):
 		right = statusStyle.Render(m.status)
 	case m.unsaved:

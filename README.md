@@ -26,6 +26,11 @@ editor.
   restores that whole version to the present as a new commit — nothing is
   ever destructively lost, since the state right before a restore is itself
   still in the log, restorable the same way.
+- **Errors get a real screen, not a truncated footer line.** Save/commit/editor
+  failures switch to a full-screen, scrollable, mouse-selectable view of the
+  whole error (`Esc`/`Enter` to dismiss, `Super+C`/`Ctrl+Y` to copy it out),
+  and every error is also appended to
+  `~/.local/share/omarchy-working-memory/error.log` with a timestamp.
 - **`Ctrl+E` drops you into real `$EDITOR`** (nvim by default) on the actual
   note file — full LazyVim, real visual-mode selection, yank to the system
   clipboard, macros, all of it. `bubbles/textarea` has no selection concept
@@ -55,6 +60,11 @@ icon via `omarchy bar put`.
 | `Ctrl+R`             | Open history (time machine)       |
 | `Ctrl+S`             | Save + commit immediately         |
 | `Ctrl+Q`             | Save + commit, then quit          |
+
+A save, commit, or `Ctrl+E` failure switches to a full-screen error view
+instead — `Esc`/`Enter` dismisses it, `Super+C`/`Ctrl+Y` copies the error
+text, and it's always appended to
+`~/.local/share/omarchy-working-memory/error.log` too.
 
 Otherwise it's a normal text area (arrows, backspace, word-jump with
 `Alt+Left/Right`, etc. — see `github.com/charmbracelet/bubbles/textarea`).
@@ -127,6 +137,16 @@ auto-commit ~20s after that (or immediately on `Ctrl+S` / quit).
   `WindowSizeMsg` case calls it unconditionally (history can be opened at
   any time), so `New()` must construct `historyList` up front, not leave it
   as a zero-value field waiting for `Ctrl+R` to fill in.
+- **A one-line, right-aligned footer is the wrong place for an error
+  message.** The original `m.err != nil` footer branch just concatenated
+  `hints + padding + err.Error()` on one line with no wrapping or
+  truncation — for anything longer than the terminal width (a Go
+  `fork/exec` error, for instance) this silently overflowed and corrupted
+  the display: cut-off red text with nothing to mouse-select, because the
+  overflowing part was never actually laid out as selectable cells.
+  Confirmed by reproducing it with a broken `$EDITOR` and a screenshot, then
+  fixed by giving errors their own full-screen `viewport` instead of
+  fighting the footer's one line (see `fail()` in `model.go`).
 - **`textarea.SetValue` leaves the cursor at (0,0)**, not at the end of the
   text it just set — so loading existing content and skipping `CursorEnd()`
   lands you on the top line of yesterday's notes every time the app opens.

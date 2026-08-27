@@ -25,7 +25,7 @@ func (h historyItem) FilterValue() string { return h.Message }
 func (m Model) openHistory() (tea.Model, tea.Cmd) {
 	commits, err := m.store.Log()
 	if err != nil {
-		m.err = err
+		m.fail(err)
 		return m, nil
 	}
 	if len(commits) == 0 {
@@ -81,7 +81,7 @@ func (m Model) viewHistoryList() string {
 func (m Model) openHistoryView(c store.Commit) (tea.Model, tea.Cmd) {
 	content, err := m.store.ShowAt(c.Hash)
 	if err != nil {
-		m.err = err
+		m.fail(err)
 		return m, nil
 	}
 	vp := viewport.Model{Width: m.width, Height: m.height - 2}
@@ -106,17 +106,17 @@ func (m Model) updateHistoryView(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "r":
 			if err := m.store.RestoreAt(m.historySelected.Hash, m.historySelected.Time); err != nil {
-				m.err = err
+				m.fail(err)
 				return m, nil
 			}
 			content, err := m.store.Load()
 			if err != nil {
-				m.err = err
+				m.fail(err)
 				return m, nil
 			}
 			m.ta.SetValue(content)
 			m.ta.CursorEnd()
-			m.unsaved, m.uncommitted, m.err = false, false, nil
+			m.unsaved, m.uncommitted = false, false
 			m.mode = modeEdit
 			m.setStatus("restored " + m.historySelected.Time.Format("Jan 2 15:04"))
 			return m, nil
