@@ -4,174 +4,140 @@ A plain-text scratchpad for [Omarchy](https://omarchy.org/), built around Cal
 Newport's [working-memory.txt](https://calnewport.com/deep-habits-workingmemory-txt-the-most-important-productivity-tool-youve-never-heard-of/)
 idea: one always-available text file to park notes, half-formed thoughts, and
 things to paste back out later, without breaking your flow to open a full
-editor.
+editor. Built with Qt Quick and C++, in the same stack as
+[omawrite](https://github.com/omacom-io/omawrite) and Omarchy's own shell.
 
 - **Toggle from anywhere**: `Super+N` or click the bar icon. It shows/hides
-  a floating terminal via a dedicated Hyprland special workspace — closing it
+  a floating window via a dedicated Hyprland special workspace — closing it
   just hides it, so whatever's unsaved stays put.
 - **Plain text**, not markdown. No formatting to fight with.
-- **Clipboard-first**: `Super+V`/`Ctrl+V` paste straight from the system
-  clipboard via `wl-paste`; `Super+C`/`Ctrl+Y` copy the whole buffer out via
-  `wl-copy`. `Super+V`/`Super+C` are Omarchy's own universal clipboard
-  shortcuts (see "Gotchas" below for why that needs a dedicated foot config).
+- **Real, native text selection**: it's a real `TextArea`, so `Shift`+arrows,
+  double/triple-click, click-and-drag — all of it works exactly like every
+  other text field on your desktop. No terminal to fight for this.
+- **Clipboard just works**: `Ctrl+C`/`Ctrl+V` (and Omarchy's `Super+C`/
+  `Super+V`) are native Qt clipboard handling — no `wl-copy`/`wl-paste`
+  plumbing needed (see "Why C++/Qt" below for why that's not incidental).
 - **Versioned like git, because it is git**: every save auto-commits to a
   local git repo, so the file's history is just `git log` /
   `git show <rev>:working-memory.txt` away. No custom diffing engine — real
   git, real commits.
-- **Time machine (`Ctrl+R`)**: a searchable, fuzzy-filterable list of every
-  past version (each commit's message is a preview of its content, not just
-  a timestamp — that's what makes scanning history actually work). Pick one
-  to view it read-only; select text with the mouse and `Super+C`/`Ctrl+Y`
-  copy it out same as ever, since it's still just a real terminal. `r`
-  restores that whole version to the present as a new commit — nothing is
-  ever destructively lost, since the state right before a restore is itself
-  still in the log, restorable the same way.
-- **Errors get a real screen, not a truncated footer line.** Save/commit/editor
-  failures switch to a full-screen, scrollable, mouse-selectable view of the
-  whole error (`Esc`/`Enter` to dismiss, `Super+C`/`Ctrl+Y` to copy it out),
-  and every error is also appended to
+- **Time machine (`Ctrl+R`)**: a searchable list of every past version (each
+  commit's message is a preview of its content, not just a timestamp — that's
+  what makes scanning history actually work). Pick one to view it read-only;
+  select text and `Ctrl+C`/`Super+C` copy it out same as ever. `r` restores
+  that whole version to the present as a new commit — nothing is ever
+  destructively lost, since the state right before a restore is itself still
+  in the log, restorable the same way.
+- **Follows Omarchy's live theme**: background/foreground/accent/selection
+  colors and dark/light mode are read straight from
+  `~/.local/state/omarchy/current/theme/colors.toml` and update immediately
+  when you switch themes.
+- **Errors get a real screen**, not a truncated status line: a save/commit
+  failure switches to a full-screen, scrollable, selectable view of the
+  whole error, and every error is also appended to
   `~/.local/share/omarchy-working-memory/error.log` with a timestamp.
-- **`Ctrl+E` drops you into real `$EDITOR`** (nvim by default) on the actual
-  note file — full LazyVim, real visual-mode selection, yank to the system
-  clipboard, macros, all of it. `bubbles/textarea` has no selection concept
-  at all to build keyboard selection on top of, so rather than reimplement a
-  worse version of an editor you already know, this just hands the terminal
-  over to the real one and reloads when it exits.
+
+## Why C++/Qt (not the terminal)
+
+This was originally a Go + Bubble Tea TUI. It got the git-backed history and
+auto-save/commit logic right, but kept needing hand-built workarounds for
+things a GUI toolkit gives you for free:
+
+- `bubbles/textarea` (the terminal text-editing library, in both its v1 and
+  v2 releases) has **no text-selection concept at all** — no shift-arrow, no
+  mouse selection, nothing to copy a specific chunk of text from. Getting
+  keyboard selection working at all would have meant hand-rolling anchor
+  tracking and wrap-aware highlight rendering against a library that assumes
+  none of this exists.
+- Terminal windows need Omarchy's `Super+C`/`Super+V` to be specially
+  routed to `Ctrl+Insert`/`Shift+Insert` (see `apps/terminals.lua`'s
+  terminal-tag rule) — which then needs the terminal itself (foot, in the
+  old version) configured to convert those into real clipboard actions,
+  since Bubble Tea's own key decoder can't even represent that combo.
+- A one-line, right-aligned footer status is the wrong place for an error
+  message: a long one silently overflowed the terminal width with no
+  wrapping, corrupting the display into cut-off, unselectable red text.
+
+A real `QQuickTextArea` gets shift-arrow/word/mouse selection, native OS
+clipboard (`Ctrl+C`/`Ctrl+V`, and Omarchy's `Super+C`/`Super+V` route to
+those directly once the window isn't tagged as a terminal — see below),
+native window focus, and text wrapping/scrolling for free. The git-backed
+store logic carried over almost unchanged — it was already just a thin
+wrapper around shelling out to `git`.
 
 ## Install
+
+Requires Qt 6 (`qt6-base`, `qt6-declarative`, `qt6-quickcontrols2` — the
+latter may already be pulled in by `qt6-declarative` on Arch/Omarchy) and a
+C++ toolchain (`gcc`, `make`, `qmake6`/`qmake`).
 
 ```sh
 cd ~/code/personal/omarchy-working-memory
 ./install.sh
 ```
 
-This builds the binary onto `~/.local/bin`, symlinks the Quickshell
-bar-widget plugin into `~/.config/omarchy/plugins/`, wires the Hyprland
-window rule + `Super+N` binding into `~/.config/hypr/`, and adds the bar
-icon via `omarchy bar put`.
+This builds the binary (`bin/build`, a plain `qmake && make`) onto
+`~/.local/bin`, symlinks the Quickshell bar-widget plugin into
+`~/.config/omarchy/plugins/`, wires the Hyprland window rule + `Super+N`
+binding into `~/.config/hypr/`, and adds the bar icon via `omarchy bar put`.
 
-## Keys (inside the scratchpad)
+## Keys
 
-| Key                  | Action                            |
-|----------------------|------------------------------------|
-| `Super+V` / `Ctrl+V` | Paste system clipboard at cursor  |
-| `Super+C` / `Ctrl+Y` | Copy the whole buffer to clipboard |
-| `Ctrl+E`              | Edit in `$EDITOR` (nvim), for real selection/visual mode |
-| `Ctrl+R`             | Open history (time machine)       |
-| `Ctrl+S`             | Save + commit immediately         |
-| `Ctrl+Q`             | Save + commit, then quit          |
+| Key                  | Action                                    |
+|-----------------------|-------------------------------------------|
+| `Ctrl+C` / `Super+C`  | Copy selection (or `Ctrl+V`/`Super+V` to paste) |
+| `Ctrl+R`              | Open history (time machine)               |
+| `Ctrl+S`              | Save + commit immediately                 |
 
-A save, commit, or `Ctrl+E` failure switches to a full-screen error view
-instead — `Esc`/`Enter` dismisses it, `Super+C`/`Ctrl+Y` copies the error
-text, and it's always appended to
-`~/.local/share/omarchy-working-memory/error.log` too.
-
-Otherwise it's a normal text area (arrows, backspace, word-jump with
-`Alt+Left/Right`, etc. — see `github.com/charmbracelet/bubbles/textarea`).
+Otherwise it's a normal text field — click-drag or `Shift`+arrows to select,
+double/triple-click for word/line, everything you'd expect. Saving happens
+automatically ~1s after you stop typing, with a git commit ~20s after that.
 
 ### History (`Ctrl+R`)
 
-| Key       | Where           | Action                          |
-|-----------|-----------------|----------------------------------|
-| `↑`/`↓`   | list            | move through past versions       |
-| `/`       | list            | fuzzy-filter by content preview  |
-| `Enter`   | list            | view the selected version        |
-| `Esc`     | list            | back to editing                  |
-| `Esc`     | viewing         | back to the list                 |
-| `r`       | viewing         | restore this version to the present |
-| `Super+C`/`Ctrl+Y` | viewing | select-and-copy, or copy the whole version |
-| `Ctrl+R`  | list or viewing | straight back to editing         |
+| Key            | Where           | Action                              |
+|-----------------|-----------------|---------------------------------------|
+| Type            | list            | filter by content preview             |
+| `↑`/`↓`, click  | list            | move through / open a past version    |
+| `Enter`         | list            | view the selected version             |
+| `Esc`           | either          | back (view → list → editing)          |
+| `r`             | viewing         | restore this version to the present   |
+| `Ctrl+C`/`Super+C` | viewing      | select-and-copy                       |
+
+A save/commit failure (or a history operation failing) switches to a
+full-screen error view instead: `Esc`/`Enter` dismisses it, `Ctrl+C`/
+`Super+C` copies the error text, and it's always in `error.log` too.
 
 ## Data
 
 The note lives at `~/.local/share/omarchy-working-memory/working-memory.txt`
-(override with `OMARCHY_WORKING_MEMORY_DIR`), inside a git repo that's
-created on first run. Edits autosave ~1s after you stop typing, and
-auto-commit ~20s after that (or immediately on `Ctrl+S` / quit).
+(override with `OMARCHY_WORKING_MEMORY_DIR`), inside a git repo created on
+first run.
 
-## Gotchas this repo already works around
+## Gotchas this repo works around
 
-- **Ghostty ignores `--app-id`/`--class`** when launched via `xdg-terminal-exec`
-  or directly. Since Hyprland window rules need a stable identifier at the
-  moment the window maps, the toggle script launches the scratchpad via
-  `foot` explicitly (which does honor `--app-id`) rather than through the
-  system's default terminal.
-- **`hyprctl dispatch <name> <args>`** (the classic two-token CLI form) is
-  silently rejected on this Omarchy/Hyprland build — it prints a Lua parse
-  error to stderr but still exits non-zero without acting. The working form
-  is `hyprctl eval 'hl.dispatch(hl.dsp.<category>.<action>(...))'` (see
-  `bin/omarchy-working-memory-toggle`'s `reveal()`). Bindings written inside
-  `.lua` config files (e.g. `o.bind(...)`) are unaffected — this only bites
-  ad hoc CLI dispatches.
-- **Window rules apply once, at map time.** A rule matched on `title` won't
-  retroactively apply once a late title update arrives (which is how Ghostty
-  behaves) — hence matching on `class` via `foot` instead.
-- **Omarchy's `Super+V`/`Super+C` aren't literally Ctrl+V/Ctrl+C for terminal
-  windows.** `bindings/clipboard.lua` in the omarchy package detects the
-  focused window is a terminal and synthesizes `Shift+Insert`/`Ctrl+Insert`
-  instead, but only for windows whose class matches its own fixed
-  terminal-tag list (`default/hypr/apps/terminals.lua`) — which is why the
-  window class is `org.omarchy.working-memory` (matching that list's
-  `org\.omarchy\..*` pattern) rather than something arbitrary; an
-  unrecognized class falls back to literal `Ctrl+V`/`Ctrl+C`.
-- **Bubble Tea cannot decode `Shift+Insert`/`Ctrl+Insert` at all**, so an
-  app-level keybinding for either can never fire no matter how it's
-  written — `charmbracelet/bubbletea@v1.3.10`'s key-sequence table
-  (`key.go`) has no entry for the modified form of Insert, only the bare
-  key. `foot-scratchpad.ini` handles both at the terminal level instead:
-  `clipboard-copy`/`clipboard-paste` are rebound to also trigger on
-  `Control+Insert`/`Shift+Insert` (on top of foot's own defaults), which
-  talk to the real Wayland clipboard directly and land in the app as
-  ordinary typed input — no app-side decoding needed. This also fixes a
-  semantic mismatch an app-level bind would have had anyway: foot's
-  clipboard-copy copies whatever is actually *selected*, not the whole
-  buffer regardless of selection.
-- **Bubble Tea's `Init()` has a value receiver.** Calling `ta.Focus()` there
-  mutates a local copy that gets discarded — the model the runtime actually
-  drives never becomes focused, so it silently accepts keypresses without
-  ever inserting characters (an easy one to miss, since paste — which
-  mutates the buffer directly via `InsertString`, bypassing focus entirely —
-  still works fine). Focus in `New()` instead, before the model is built.
-- **`list.Model.SetSize` panics if called before the list was ever built
-  via `list.New(...)`** — including on its zero value. `Model.Update`'s
-  `WindowSizeMsg` case calls it unconditionally (history can be opened at
-  any time), so `New()` must construct `historyList` up front, not leave it
-  as a zero-value field waiting for `Ctrl+R` to fill in.
-- **A one-line, right-aligned footer is the wrong place for an error
-  message.** The original `m.err != nil` footer branch just concatenated
-  `hints + padding + err.Error()` on one line with no wrapping or
-  truncation — for anything longer than the terminal width (a Go
-  `fork/exec` error, for instance) this silently overflowed and corrupted
-  the display: cut-off red text with nothing to mouse-select, because the
-  overflowing part was never actually laid out as selectable cells.
-  Confirmed by reproducing it with a broken `$EDITOR` and a screenshot, then
-  fixed by giving errors their own full-screen `viewport` instead of
-  fighting the footer's one line (see `fail()` in `model.go`).
-- **`textarea.SetValue` leaves the cursor at (0,0)**, not at the end of the
-  text it just set — so loading existing content and skipping `CursorEnd()`
-  lands you on the top line of yesterday's notes every time the app opens.
-- **`hl.dsp.workspace.toggle_special` only changes which special workspace is
-  *visible* — it never moves keyboard focus.** Without an explicit focus
-  call, Super+N would show the scratchpad on screen while keystrokes kept
-  going to whatever was focused a moment before (confirmed: `activewindow`
-  stayed the previous window after toggling). The fix,
-  `hl.dsp.focus({ window = "class:^(...)$" })`, has its own trap: focusing a
-  window that lives on a special workspace implicitly re-reveals that
-  workspace, so calling it unconditionally after `toggle_special` means a
-  *hiding* toggle gets immediately undone by the focus call right after it.
-  `bin/omarchy-working-memory-toggle`'s `reveal()` only focuses when
-  `monitors[].specialWorkspace.name` shows the workspace actually became
-  visible from this toggle — not when it just went into hiding.
-- **`bubbles/textarea` has no selection concept whatsoever** — no
-  shift-arrow, no visual mode, nothing to hook a "copy the selection" command
-  onto. `Ctrl+E` sidesteps this entirely rather than reimplementing it: flush
-  to disk, then `tea.ExecProcess` hands the whole terminal to `$EDITOR` on
-  the real file (same trick `git commit`, `ranger`, `lf` use), and the buffer
-  reloads once it exits. Considered `github.com/kujtimiihoxha/vimtea` (an
-  in-process vim-mode emulation component) instead, but it's early-stage
-  (~15 commits) with an undocumented clipboard hook and expects to own the
-  whole `tea.Program` rather than being embedded in ours — not worth the
-  risk after how much the Super+C/Super+V integration already cost.
+- **Hyprland's Lua-config fork rejects the classic `hyprctl dispatch <name>
+  <args>` CLI form** — it prints a Lua parse error to stderr but exits 0
+  without acting. The working form is
+  `hyprctl eval 'hl.dispatch(hl.dsp.<category>.<action>(...))'` (see
+  `bin/omarchy-working-memory-toggle`'s `reveal()`).
+- **`hl.dsp.workspace.toggle_special` only changes visibility, not
+  keyboard focus.** Without an explicit follow-up focus call, `Super+N`
+  would show the scratchpad while keystrokes kept going to whatever was
+  focused before the toggle. The follow-up focus call has to be
+  conditional, though: focusing a window on a special workspace implicitly
+  *reveals* that workspace, so calling it unconditionally after
+  `toggle_special` would undo every hide immediately after it happened.
+- **Don't use an `org.omarchy.*` class/app-id for a non-terminal app.**
+  Omarchy's terminal-tag rule (`apps/terminals.lua`) matches that prefix
+  unconditionally to tag Omarchy-launched TUIs as terminals, which makes
+  `Super+C`/`Super+V` send the terminal-style `Ctrl+Insert`/`Shift+Insert`
+  instead of literal `Ctrl+C`/`Ctrl+V` — confirmed directly: the clipboard
+  stayed untouched after `Super+C` while the window carried the
+  `terminal*` tag, and started working the moment the class no longer
+  matched that prefix. `app.setDesktopFileName()` in `src/main.cpp` and the
+  window-rule match in `hypr/working-memory.lua` both use a plain
+  `omarchy-working-memory` class for exactly this reason.
 
 ## Roadmap
 

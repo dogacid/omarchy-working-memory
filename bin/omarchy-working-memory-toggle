@@ -1,27 +1,16 @@
 #!/bin/bash
-# Show/hide the working-memory scratchpad: a floating terminal running the
-# omarchy-working-memory TUI, parked on its own Hyprland special workspace
-# so toggling hides it instead of closing it (state, including whatever is
-# unsaved in the buffer, is preserved between toggles).
+# Show/hide the working-memory scratchpad: a floating Qt window parked on
+# its own Hyprland special workspace so toggling hides it instead of
+# closing it (state, including whatever is unsaved in the buffer, is
+# preserved between toggles).
 #
 # Bound to both the Super+N keybinding and the bar icon click, so both
 # trigger the exact same show/hide behavior.
 set -euo pipefail
 
-# org.omarchy.* rather than a bare name: Omarchy's own terminal-tag rule
-# (default/hypr/apps/terminals.lua) matches window class against a fixed
-# list that includes this pattern specifically so Omarchy-launched TUIs get
-# tagged "terminal". Without that tag, Super+V/Super+C fall back to sending
-# literal Ctrl+V/Ctrl+C instead of Shift+Insert/Ctrl+Insert — which, bound
-# to quit in this app, made Super+C look like it was closing the window
-# instead of copying.
-APP_ID="org.omarchy.working-memory"
+APP_ID="omarchy-working-memory"
 WORKSPACE="working-memory"
-
-# Resolve through the symlink (this script is installed as a symlink into
-# ~/.local/bin) to find the repo-provided foot config alongside it.
-REPO_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
-FOOT_CONFIG="$REPO_DIR/foot-scratchpad.ini"
+BIN="$(command -v omarchy-working-memory || echo "$HOME/.local/bin/omarchy-working-memory")"
 
 is_running() {
   hyprctl clients -j | jq -e --arg c "$APP_ID" '.[] | select(.class == $c)' >/dev/null 2>&1
@@ -53,14 +42,10 @@ reveal() {
   # rejected here (prints a Lua parse error but still exits 0).
   hyprctl eval "hl.dispatch(hl.dsp.workspace.toggle_special(\"$WORKSPACE\"))" >/dev/null
   # toggle_special only changes which workspace is *visible* — it doesn't
-  # move keyboard focus, so without this the special workspace appears on
-  # screen but keystrokes keep going to whatever was focused before Super+N
-  # (confirmed: activewindow stayed the previous window after toggling).
-  # Only focus when the toggle just *showed* the workspace: focusing a
-  # window on a special workspace implicitly reveals it too, so calling
-  # this unconditionally after a hiding toggle immediately re-shows it,
-  # making hide never work (confirmed: specialWorkspace stayed set after
-  # a "hide" toggle once this was unconditional).
+  # move keyboard focus. Only focus when the toggle just *showed* the
+  # workspace: focusing a window on a special workspace implicitly reveals
+  # it too, so calling this unconditionally after a hiding toggle would
+  # immediately re-show it, making hide never work.
   if special_workspace_visible; then
     hyprctl eval "hl.dispatch(hl.dsp.focus({ window = \"class:^($APP_ID)\$\" }))" >/dev/null
   fi
@@ -71,16 +56,9 @@ if is_running; then
   exit 0
 fi
 
-# Launched via foot explicitly rather than the user's default terminal:
-# Ghostty (this system's xdg-terminal-exec default) ignores --app-id
-# entirely, which breaks the window-rule matching below. Foot honors it
-# reliably and starts fast, which suits a single-purpose scratchpad well.
-setsid foot --config="$FOOT_CONFIG" --app-id="$APP_ID" -e omarchy-working-memory >/dev/null 2>&1 &
+setsid "$BIN" >/dev/null 2>&1 &
 disown
 
-# Poll briefly for the window to map AND land on the special workspace,
-# then reveal it. (The window rule sends it there silently, so the very
-# first launch would otherwise start invisible.)
 for _ in $(seq 1 40); do
   if on_special_workspace; then
     reveal
