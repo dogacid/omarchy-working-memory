@@ -72,19 +72,28 @@ wrapper around shelling out to `git`.
 
 ## Install
 
-Requires Qt 6 (`qt6-base`, `qt6-declarative`, `qt6-quickcontrols2` — the
-latter may already be pulled in by `qt6-declarative` on Arch/Omarchy) and a
-C++ toolchain (`gcc`, `make`, `qmake6`/`qmake`).
+On another Omarchy (Arch-based) machine:
 
 ```sh
-cd ~/code/personal/omarchy-working-memory
+sudo pacman -S --needed qt6-base qt6-declarative gcc make git jq
+git clone https://github.com/dogacid/omarchy-working-memory.git
+cd omarchy-working-memory
 ./install.sh
 ```
 
-This builds the binary (`bin/build`, a plain `qmake && make`) onto
-`~/.local/bin`, symlinks the Quickshell bar-widget plugin into
+`qt6-quickcontrols2` isn't a separate package on Arch/Omarchy — it's bundled
+into `qt6-declarative` (confirmed via `pacman -Qo` against the actual
+installed `.so`). `jq` and `git` are almost certainly already on any real
+Omarchy install (Omarchy's own scripts and this repo's toggle script both
+lean on `jq` for parsing `hyprctl` output), but `--needed` makes the pacman
+call a safe no-op either way if so.
+
+`install.sh` is location-independent — clone it anywhere, `cd` in, run it
+from there. It builds the binary (`bin/build`, a plain `qmake && make`)
+onto `~/.local/bin`, symlinks the Quickshell bar-widget plugin into
 `~/.config/omarchy/plugins/`, wires the Hyprland window rule + `Super+N`
 binding into `~/.config/hypr/`, and adds the bar icon via `omarchy bar put`.
+Re-running it after a `git pull` picks up any update — it's idempotent.
 
 ## Keys
 
