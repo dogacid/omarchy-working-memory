@@ -26,8 +26,10 @@ editor. Built with Qt Quick and C++, in the same stack as
 - **Time machine (`Ctrl+R`)**: a searchable list of every past version on the
   left, its full text read-only on the right — the preview follows the list
   as you move through it, so skimming many versions to find one is one
-  continuous motion, not select-view-back-select-view. Select text and
-  `Ctrl+C`/`Super+C` copy it out same as ever; `Enter` restores that whole
+  continuous motion, not select-view-back-select-view. Fully keyboard-driven,
+  vim-style: `j`/`k` (or `↑`/`↓`) move through the list, `v`/`V` starts a
+  charwise/linewise selection in the preview, `h`/`j`/`k`/`l` extend it, `y`
+  (or `Ctrl+C`/`Super+C`) yanks it out. `Enter` restores that whole
   version to the present as a new commit — nothing is ever destructively
   lost, since the state right before a restore is itself still in the log,
   restorable the same way.
@@ -103,15 +105,22 @@ read-only, on the right — following the list live, not waiting for
 `Enter`, since the point is skimming through many versions quickly to find
 one. A "Read-only — <date>" title strip above the preview and a faint
 background tint both make it unmistakable you're not looking at the live
-note.
+note. Fully keyboard-driven, vim-style:
 
-| Key                  | Action                                  |
-|-----------------------|-------------------------------------------|
-| Type                 | filter the list by content preview        |
-| `↑`/`↓`, click        | move through the list — preview updates live |
-| `Enter`               | restore the selected version to the present |
-| `Ctrl+C`/`Super+C`    | select text in the preview and copy it out |
-| `Esc`                 | back to editing                           |
+| Key                  | Where     | Action                                  |
+|-----------------------|-----------|-------------------------------------------|
+| `j`/`k`, `↑`/`↓`, click | list    | move through the list — preview updates live |
+| `/`                   | list      | jump to the search field                  |
+| `v` / `V`             | list      | enter visual selection in the preview — charwise / linewise |
+| `h`/`j`/`k`/`l`, arrows | visual  | move the cursor, extending the selection from where `v`/`V` started |
+| `y`, `Ctrl+C`/`Super+C` | visual  | yank the selection to the clipboard, back to the list |
+| `Esc`                 | visual    | cancel the selection, back to the list (not out of history) |
+| `Enter`               | list      | restore the selected version to the present |
+| `Esc`                 | list      | back to editing                           |
+
+Mouse selection (click-drag, double/triple-click) still works in the
+preview too — `v`/`V` is there for going fully keyboard-driven, not a
+replacement for it.
 
 A save/commit failure (or a history operation failing) switches to a
 full-screen error view instead: `Esc`/`Enter` dismisses it, `Ctrl+C`/

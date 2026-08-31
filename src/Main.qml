@@ -21,6 +21,13 @@ ApplicationWindow {
     property var selectedEntry: null
     property string historyContent: ""
 
+    // Vim-style selection within the read-only preview: "none" | "char"
+    // (v) | "line" (V). previewAnchor is the fixed end of the selection;
+    // the preview TextArea's own cursorPosition is the moving end — same
+    // anchor/cursor model vim's visual mode uses.
+    property string previewSelMode: "none"
+    property int previewAnchor: 0
+
     onClosing: backend.save()
 
     function openHistory() {
@@ -61,12 +68,57 @@ ApplicationWindow {
         editor.forceActiveFocus();
     }
 
+    // --- Vim-style visual selection in the history preview ---------------
+    // v/V starts it (anchored at the top of the text), h/j/k/l or the
+    // arrow keys move the cursor and extend the selection, y or Ctrl+C/
+    // Super+C yanks it to the clipboard, Esc cancels it — all scoped to
+    // "one step back" the way real vim's Escape returns Visual to Normal
+    // rather than closing the buffer: canceling out of visual mode lands
+    // back on the list, not out of history entirely.
+    function enterVisualMode(kind) {
+        if (!win.selectedEntry) return;
+        win.previewSelMode = kind;
+        win.previewAnchor = 0;
+        previewArea.cursorPosition = 0;
+        previewArea.forceActiveFocus();
+        win.updatePreviewSelection();
+    }
+
+    function updatePreviewSelection() {
+        if (win.previewSelMode === "none") return;
+        const a = win.previewAnchor, c = previewArea.cursorPosition;
+        if (win.previewSelMode === "line") {
+            const text = win.historyContent;
+            const lo = Math.min(a, c), hi = Math.max(a, c);
+            const lineStart = text.lastIndexOf("\n", lo - 1) + 1;
+            const nlAfter = text.indexOf("\n", hi);
+            previewArea.select(lineStart, nlAfter === -1 ? text.length : nlAfter);
+        } else {
+            previewArea.select(Math.min(a, c), Math.max(a, c));
+        }
+    }
+
+    function exitVisualMode() {
+        win.previewSelMode = "none";
+        previewArea.deselect();
+        historyList.forceActiveFocus();
+    }
+
+    function yankPreviewSelection() {
+        if (win.previewSelMode === "none") return;
+        if (previewArea.selectedText) backend.copyToClipboard(previewArea.selectedText);
+        win.exitVisualMode();
+    }
+
     // Global shortcuts. Ctrl+E (drop to a real editor for selection) is
     // gone entirely now that the editor is a native QQuickTextArea with
     // real shift-arrow/word/mouse selection built in.
     Shortcut { sequence: "Ctrl+S"; enabled: win.mode === "edit"; onActivated: backend.save() }
     Shortcut { sequence: "Ctrl+R"; onActivated: win.mode === "edit" ? win.openHistory() : win.backToEdit() }
-    Shortcut { sequence: "Escape"; enabled: win.mode !== "edit"; onActivated: win.backToEdit() }
+    // Disabled while visual-selecting: Esc there means "cancel the
+    // selection" (handled in previewArea's own Keys.onPressed below), not
+    // "leave history" — a second Esc after that falls through to this one.
+    Shortcut { sequence: "Escape"; enabled: win.mode !== "edit" && win.previewSelMode === "none"; onActivated: win.backToEdit() }
 
     Connections {
         target: backend
@@ -145,6 +197,7 @@ ApplicationWindow {
                     background: Rectangle { color: backend.themeSelection }
                     onTextChanged: win.filterHistory(text)
                     Keys.onDownPressed: historyList.forceActiveFocus()
+                    Keys.onEscapePressed: historyList.forceActiveFocus()
                 }
 
                 ListView {
@@ -156,6 +209,18 @@ ApplicationWindow {
                     keyNavigationEnabled: true
                     highlightMoveDuration: 60
                     onCurrentIndexChanged: win.showSelected()
+
+                    // j/k mirror the arrow keys vim-style; / matches vim's
+                    // own search-entry key (letters are otherwise reserved
+                    // for navigation/visual-mode here, so "just start
+                    // typing" would collide with v/V/y/j/k).
+                    Keys.onPressed: function (event) {
+                        if (event.text === "j") { historyList.currentIndex = Math.min(historyList.currentIndex + 1, historyList.count - 1); event.accepted = true; }
+                        else if (event.text === "k") { historyList.currentIndex = Math.max(historyList.currentIndex - 1, 0); event.accepted = true; }
+                        else if (event.key === Qt.Key_Slash) { historySearch.forceActiveFocus(); event.accepted = true; }
+                        else if (event.text === "v") { win.enterVisualMode("char"); event.accepted = true; }
+                        else if (event.text === "V") { win.enterVisualMode("line"); event.accepted = true; }
+                    }
 
                     delegate: ItemDelegate {
                         width: historyList.width
@@ -221,6 +286,7 @@ ApplicationWindow {
                     Layout.fillHeight: true
 
                     TextArea {
+                        id: previewArea
                         readOnly: true
                         selectByMouse: true
                         persistentSelection: true
@@ -240,6 +306,47 @@ ApplicationWindow {
                         leftPadding: 16
                         rightPadding: 16
                         bottomPadding: 12
+
+                        // Only meaningful once v/V (see historyList above)
+                        // put us in visual mode — h/j/k/l (and the arrow
+                        // keys) move the cursor and extend the selection
+                        // from the anchor, vim-style. j/k move by logical
+                        // line (found via the raw text's own newlines, not
+                        // the wrapped display row) at roughly the same
+                        // column, using the cursor's pixel position to
+                        // land on the right row — QML has no "move by
+                        // visual line" API to call directly.
+                        Keys.onPressed: function (event) {
+                            if (win.previewSelMode === "none") return;
+
+                            const text = win.historyContent;
+                            const lineStartOf = (pos) => text.lastIndexOf("\n", pos - 1) + 1;
+                            const lineEndOf = (pos) => { const i = text.indexOf("\n", pos); return i === -1 ? text.length : i; };
+
+                            let handled = true;
+                            if (event.key === Qt.Key_Escape) {
+                                win.exitVisualMode();
+                            } else if (event.text === "y" || (event.key === Qt.Key_C && (event.modifiers & Qt.ControlModifier))) {
+                                win.yankPreviewSelection();
+                            } else if (event.key === Qt.Key_Left || event.text === "h") {
+                                previewArea.cursorPosition = Math.max(0, previewArea.cursorPosition - 1);
+                            } else if (event.key === Qt.Key_Right || event.text === "l") {
+                                previewArea.cursorPosition = Math.min(text.length, previewArea.cursorPosition + 1);
+                            } else if (event.key === Qt.Key_Down || event.text === "j") {
+                                const r = previewArea.cursorRectangle;
+                                previewArea.cursorPosition = previewArea.positionAt(r.x, r.y + r.height * 1.5);
+                            } else if (event.key === Qt.Key_Up || event.text === "k") {
+                                const r = previewArea.cursorRectangle;
+                                previewArea.cursorPosition = previewArea.positionAt(r.x, r.y - r.height * 0.5);
+                            } else {
+                                handled = false;
+                            }
+
+                            if (handled) {
+                                win.updatePreviewSelection();
+                                event.accepted = true;
+                            }
+                        }
                     }
                 }
             }
@@ -261,9 +368,13 @@ ApplicationWindow {
                     color: backend.themeMuted
                     font.pixelSize: 12
                     elide: Text.ElideRight
-                    text: win.mode === "edit"
-                        ? "ctrl+r history · ctrl+s save · select text + ctrl+c/super+c to copy"
-                        : "type to search · ↑/↓ move · enter restore · esc back to editing"
+                    text: {
+                        if (win.mode === "edit")
+                            return "ctrl+r history · ctrl+s save · select text + ctrl+c/super+c to copy";
+                        if (win.previewSelMode !== "none")
+                            return "h/j/k/l move · y/ctrl+c/super+c yank · esc cancel selection";
+                        return "j/k/↑/↓ move · / search · v/V visual select · enter restore · esc back";
+                    }
                 }
                 Text {
                     color: backend.themeAccent
