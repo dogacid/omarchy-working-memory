@@ -80,6 +80,28 @@ ApplicationWindow {
         editor.insert(editor.cursorPosition, "[" + d.getFullYear() + "-" + win.pad2(d.getMonth() + 1) + "-" + win.pad2(d.getDate()) + " " + win.pad2(d.getHours()) + ":" + win.pad2(d.getMinutes()) + "]");
     }
 
+    // Ctrl+1..9: jump to the Nth "## " heading line, in document order.
+    // Headings are just a plain-text convention (not markdown rendering) —
+    // computed on demand at jump time since nothing else needs to track
+    // them live.
+    function headingPositions() {
+        const lines = editor.text.split("\n");
+        const positions = [];
+        let offset = 0;
+        for (const line of lines) {
+            if (line.startsWith("## ")) positions.push(offset);
+            offset += line.length + 1;
+        }
+        return positions;
+    }
+    function jumpToHeading(n) {
+        if (win.mode !== "edit") return;
+        const positions = win.headingPositions();
+        if (n > positions.length) return; // fewer headings than n: no-op
+        editor.cursorPosition = positions[n - 1];
+        editor.forceActiveFocus();
+    }
+
     // --- Vim-style visual selection in the history preview ---------------
     // v/V starts it (anchored at the top of the text), h/j/k/l or the
     // arrow keys move the cursor and extend the selection, y or Ctrl+C/
@@ -129,6 +151,15 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+R"; onActivated: win.mode === "edit" ? win.openHistory() : win.backToEdit() }
     Shortcut { sequence: "Alt+D"; enabled: win.mode === "edit"; onActivated: win.insertDate() }
     Shortcut { sequence: "Alt+T"; enabled: win.mode === "edit"; onActivated: win.insertDateTime() }
+    Shortcut { sequence: "Ctrl+1"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(1) }
+    Shortcut { sequence: "Ctrl+2"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(2) }
+    Shortcut { sequence: "Ctrl+3"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(3) }
+    Shortcut { sequence: "Ctrl+4"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(4) }
+    Shortcut { sequence: "Ctrl+5"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(5) }
+    Shortcut { sequence: "Ctrl+6"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(6) }
+    Shortcut { sequence: "Ctrl+7"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(7) }
+    Shortcut { sequence: "Ctrl+8"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(8) }
+    Shortcut { sequence: "Ctrl+9"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(9) }
     // Disabled while visual-selecting: Esc there means "cancel the
     // selection" (handled in previewArea's own Keys.onPressed below), not
     // "leave history" — a second Esc after that falls through to this one.
@@ -384,7 +415,7 @@ ApplicationWindow {
                     elide: Text.ElideRight
                     text: {
                         if (win.mode === "edit")
-                            return "ctrl+r history · ctrl+s save · alt+d date · alt+t date+time · select text + ctrl+c/super+c to copy";
+                            return "ctrl+r history · ctrl+s save · alt+d date · alt+t date+time · ctrl+1-9 jump headings · select text + ctrl+c/super+c to copy";
                         if (win.previewSelMode !== "none")
                             return "h/j/k/l move · y/ctrl+c/super+c yank · esc cancel selection";
                         return "j/k/↑/↓ move · / search · v/V visual select · enter restore · esc back";

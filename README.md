@@ -102,10 +102,25 @@ Re-running it after a `git pull` picks up any update — it's idempotent.
 | `Ctrl+C` / `Super+C`  | Copy selection (or `Ctrl+V`/`Super+V` to paste) |
 | `Ctrl+R`              | Open history (time machine)               |
 | `Ctrl+S`              | Save + commit immediately                 |
+| `Alt+D`               | Insert today's date as `[YYYY-MM-DD]`     |
+| `Alt+T`               | Insert date + time as `[YYYY-MM-DD HH:MM]` (24h) |
+| `Ctrl+1`..`Ctrl+9`     | Jump to the Nth `## ` heading in the note |
 
 Otherwise it's a normal text field — click-drag or `Shift`+arrows to select,
 double/triple-click for word/line, everything you'd expect. Saving happens
 automatically ~1s after you stop typing, with a git commit ~20s after that.
+
+### Headings and jumping (`Ctrl+1`..`Ctrl+9`)
+
+A line starting with `## ` (two hashes, one space) is a heading — not
+markdown rendering, just a plain-text marker (chosen over a bare `#` to
+avoid colliding with things you'd naturally type, like issue refs or hex
+colors). `Ctrl+1` jumps to the first heading in the note, `Ctrl+2` the
+second, and so on through `Ctrl+9`; a number past the last heading is a
+no-op. Useful for splitting the note into a few running threads — work,
+a project, a hobby — and jumping straight to one. There's no separate
+management step: add a `## ` line to create one, delete or move it to
+remove or reorder it.
 
 ### History (`Ctrl+R`)
 
@@ -139,7 +154,42 @@ full-screen error view instead: `Esc`/`Enter` dismisses it, `Ctrl+C`/
 
 The note lives at `~/.local/share/omarchy-working-memory/working-memory.txt`
 (override with `OMARCHY_WORKING_MEMORY_DIR`), inside a git repo created on
-first run.
+first run, always normalized onto a branch named `main` (regardless of this
+machine's own `git init` default) so multiple machines sharing a remote
+never end up pushing/pulling different refs without noticing.
+
+## Syncing across machines
+
+The same note can follow you across several Omarchy machines by pointing
+the data repo's git remote at a shared one — a private GitHub/GitLab repo to
+start, though any plain git remote works (a self-hosted Forgejo/Gitea
+instance, for example — just a URL, nothing GitHub-specific in how this
+works). One-time setup per machine, outside the app:
+
+```sh
+git -C ~/.local/share/omarchy-working-memory remote add origin <url>
+```
+
+(SSH recommended.) Nothing else to configure — sync piggybacks on the
+existing save/commit flow: a pull happens once when the app opens, and a
+pull-then-push happens after every autosave commit (~20s after you stop
+typing) and after `Ctrl+S`. The status word in the footer picks up one new
+value, `offline`, when a sync attempt can't reach the remote — your edits
+keep saving and committing locally regardless, exactly as if no remote were
+configured at all; it just hasn't reached `origin` yet and will on the next
+cycle.
+
+A real conflict (the same line edited on two machines before either could
+sync) is rare for a mostly-append note, but when it happens git leaves
+`<<<<<<<` conflict markers in the note itself and the app raises its normal
+full-screen error view once to flag it — dismiss it, edit the markers out
+like any git conflict, and the next ordinary save/commit finishes it, no
+special step required. Nothing is ever destructively lost either way: every
+version from every machine stays in the log, reachable through `Ctrl+R`.
+
+The app never manages credentials or SSH keys itself — remote auth is
+whatever you'd normally set up for that git host, non-interactively (an SSH
+key, typically), the same as any other repo.
 
 ## Gotchas this repo works around
 
@@ -175,7 +225,12 @@ first run.
 ## Roadmap
 
 - Daily rotation / "show me the last few days" browsing.
-- Branching off a note for a side train of thought.
+- Branching off a note for a side train of thought — a "rabbit hole" you can
+  wander into and later merge back or abandon, using real git branches
+  (distinct from the `## ` headings above, which stay inside one branch).
+- A read-only combined overview of all headings at a glance (a table of
+  contents view) — floated alongside the `Ctrl+1`-`9` heading jump above,
+  deferred in favor of the simpler jump-only version for now.
 
 The git-backed storage was deliberately shaped for these from the start —
 they're just more UI on top of the same `git log`/`git show`/`git branch`

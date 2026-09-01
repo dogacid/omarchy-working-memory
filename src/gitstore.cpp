@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QStringList>
@@ -13,6 +14,7 @@ namespace {
 constexpr auto kFileName = "working-memory.txt";
 constexpr auto kErrorLogName = "error.log";
 constexpr auto kFieldSep = "\x1f"; // unit separator: won't collide with real message text
+constexpr auto kBranch = "main";
 }
 
 GitStore::GitStore(QObject *parent) : QObject(parent) {}
@@ -41,6 +43,8 @@ bool GitStore::open() {
         }
         ensureIdentity();
     }
+
+    ensureBranch(QLatin1String(kBranch));
 
     if (!QFile::exists(m_path)) {
         QFile f(m_path);
@@ -184,6 +188,99 @@ bool GitStore::restoreAt(const QString &hash, const QDateTime &at) {
     return commitWithMessage(message, nullptr);
 }
 
+bool GitStore::hasRemote() const {
+    bool ok = false;
+    const QString out = gitOutput({QStringLiteral("remote")}, &ok);
+    if (!ok)
+        return false;
+    const QStringList remotes = out.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    return remotes.contains(QStringLiteral("origin"));
+}
+
+bool GitStore::pullFromRemote(bool *conflict) {
+    if (conflict) *conflict = false;
+    if (!hasRemote())
+        return true; // no remote configured: silent no-op
+
+    bool branchOk = false;
+    const QString branch = currentBranch(&branchOk);
+    if (!branchOk) {
+        m_error = QStringLiteral("git branch: ") + m_error;
+        return false;
+    }
+
+    // A remote that's reachable but doesn't have this branch yet (a brand
+    // new/empty remote — true for every machine's very first sync) isn't a
+    // failure: there's simply nothing to pull. Checking this separately,
+    // rather than just trying `pull` and treating "couldn't find remote
+    // ref" as routine, matters because the caller only pushes after a
+    // successful pull — without this check the first machine to ever sync
+    // could never actually publish anything.
+    bool lsRemoteOk = false;
+    const QString refs = gitOutput({QStringLiteral("ls-remote"), QStringLiteral("origin"), branch}, &lsRemoteOk, /*network=*/true);
+    if (!lsRemoteOk) {
+        m_error = QStringLiteral("git ls-remote: ") + m_error;
+        return false;
+    }
+    if (refs.trimmed().isEmpty())
+        return true; // nothing on the remote yet — nothing to pull
+
+    // open() creates working-memory.txt directly on disk, outside git, so on
+    // a repo with no commits yet it always exists but untracked — and git
+    // refuses to pull anything that would overwrite an untracked file. Since
+    // zero local commits means that file can't hold anything the user has
+    // ever saved, it's safe to clear it so the incoming history lands
+    // cleanly (a plain fast-forward, not a real merge, in this case).
+    if (!hasCommits())
+        QFile::remove(m_path);
+
+    // --allow-unrelated-histories is required, not optional: every machine
+    // creates its own independent init history in open() before origin is
+    // ever added, so a second machine's very first pull is always
+    // reconciling unrelated roots by construction. --no-rebase is equally
+    // required, not just a default worth stating: without it, a user with
+    // `pull.rebase = true` in their global git config (common, and true on
+    // the machine this was built on) silently gets a rebase instead of a
+    // merge, which on conflict leaves the repo mid-rebase — a state
+    // commitWithMessage()'s plain add+commit cannot resume, unlike the
+    // normal "unmerged paths" state a real merge conflict leaves. Confirmed
+    // directly: without this flag, a conflict test here left the repo stuck
+    // in `rebase-merge` instead of resolving via the ordinary save/commit
+    // flow.
+    if (git({QStringLiteral("pull"), QStringLiteral("--no-edit"), QStringLiteral("--no-rebase"),
+             QStringLiteral("--allow-unrelated-histories"),
+             QStringLiteral("origin"), branch}, /*network=*/true))
+        return true;
+
+    bool unmergedOk = false;
+    const QString unmerged = gitOutput({QStringLiteral("ls-files"), QStringLiteral("-u")}, &unmergedOk);
+    if (unmergedOk && !unmerged.trimmed().isEmpty()) {
+        if (conflict) *conflict = true;
+        m_error = QStringLiteral("sync conflict — resolve the markers in the note and save: ") + m_error;
+    } else {
+        m_error = QStringLiteral("git pull: ") + m_error;
+    }
+    return false;
+}
+
+bool GitStore::pushToRemote() {
+    if (!hasRemote())
+        return true; // no remote configured: silent no-op
+
+    bool branchOk = false;
+    const QString branch = currentBranch(&branchOk);
+    if (!branchOk) {
+        m_error = QStringLiteral("git branch: ") + m_error;
+        return false;
+    }
+
+    if (!git({QStringLiteral("push"), QStringLiteral("origin"), branch}, /*network=*/true)) {
+        m_error = QStringLiteral("git push: ") + m_error;
+        return false;
+    }
+    return true;
+}
+
 void GitStore::logError(const QString &message) const {
     QFile f(logPath());
     if (!f.open(QIODevice::Append | QIODevice::Text))
@@ -223,11 +320,38 @@ void GitStore::ensureIdentity() {
     git({QStringLiteral("config"), QStringLiteral("user.email"), QStringLiteral("working-memory@localhost")});
 }
 
-bool GitStore::git(const QStringList &args) const {
+void GitStore::ensureBranch(const QString &name) {
+    // A rename, not a checkout: safe on both a brand-new (even unborn,
+    // commit-less) repo and one with existing history, and a no-op if
+    // already on `name`. Best-effort — if it fails (e.g. no commits yet on
+    // an older git without unborn-branch rename support), later sync calls
+    // just won't find a remote worth talking to yet.
+    git({QStringLiteral("branch"), QStringLiteral("-M"), name});
+}
+
+QString GitStore::currentBranch(bool *ok) const {
+    const QString out = gitOutput({QStringLiteral("branch"), QStringLiteral("--show-current")}, ok);
+    return out.trimmed();
+}
+
+bool GitStore::hasCommits() const {
+    return git({QStringLiteral("rev-parse"), QStringLiteral("--verify"), QStringLiteral("-q"), QStringLiteral("HEAD")});
+}
+
+bool GitStore::git(const QStringList &args, bool network) const {
     QProcess proc;
     proc.setWorkingDirectory(m_dir);
+    if (network) {
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert(QStringLiteral("GIT_TERMINAL_PROMPT"), QStringLiteral("0"));
+        env.insert(QStringLiteral("GIT_SSH_COMMAND"), QStringLiteral("ssh -o BatchMode=yes -o ConnectTimeout=5"));
+        proc.setProcessEnvironment(env);
+    }
     proc.start(QStringLiteral("git"), args);
-    if (!proc.waitForFinished(10000)) {
+    const int timeoutMs = network ? 5000 : 10000;
+    if (!proc.waitForFinished(timeoutMs)) {
+        proc.kill();
+        proc.waitForFinished();
         m_error = QStringLiteral("git ") + args.join(QLatin1Char(' ')) + QStringLiteral(" timed out");
         return false;
     }
@@ -238,11 +362,20 @@ bool GitStore::git(const QStringList &args) const {
     return true;
 }
 
-QString GitStore::gitOutput(const QStringList &args, bool *ok) const {
+QString GitStore::gitOutput(const QStringList &args, bool *ok, bool network) const {
     QProcess proc;
     proc.setWorkingDirectory(m_dir);
+    if (network) {
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert(QStringLiteral("GIT_TERMINAL_PROMPT"), QStringLiteral("0"));
+        env.insert(QStringLiteral("GIT_SSH_COMMAND"), QStringLiteral("ssh -o BatchMode=yes -o ConnectTimeout=5"));
+        proc.setProcessEnvironment(env);
+    }
     proc.start(QStringLiteral("git"), args);
-    if (!proc.waitForFinished(10000)) {
+    const int timeoutMs = network ? 5000 : 10000;
+    if (!proc.waitForFinished(timeoutMs)) {
+        proc.kill();
+        proc.waitForFinished();
         m_error = QStringLiteral("git ") + args.join(QLatin1Char(' ')) + QStringLiteral(" timed out");
         if (ok) *ok = false;
         return QString();

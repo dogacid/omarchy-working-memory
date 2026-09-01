@@ -45,11 +45,29 @@ public:
 
     void logError(const QString &message) const;
 
+    // Cross-machine sync against a plain `git remote` — absent by default,
+    // so every method here is a silent no-op until the user runs
+    // `git remote add origin <url>` in the data dir themselves. No
+    // credentials are ever managed here; network calls run non-interactive
+    // and fail fast (see the `network` param on git()/gitOutput()).
+    bool hasRemote() const;
+    // On failure, *conflict distinguishes a real merge conflict (needs the
+    // user) from a routine failure like being offline (doesn't).
+    bool pullFromRemote(bool *conflict = nullptr);
+    bool pushToRemote();
+
 private:
     bool commitWithMessage(const QString &message, bool *committed);
-    bool git(const QStringList &args) const;
-    QString gitOutput(const QStringList &args, bool *ok) const;
+    bool git(const QStringList &args, bool network = false) const;
+    QString gitOutput(const QStringList &args, bool *ok, bool network = false) const;
     void ensureIdentity();
+    // Normalizes onto a single, fixed branch name regardless of this
+    // machine's `init.defaultBranch` — otherwise two machines with
+    // different git defaults would push/pull different refs on the same
+    // remote and silently never reconcile.
+    void ensureBranch(const QString &name);
+    QString currentBranch(bool *ok) const;
+    bool hasCommits() const;
     static QString previewLine(const QString &content);
     static QString shortHash(const QString &hash);
 

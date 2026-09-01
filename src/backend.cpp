@@ -34,6 +34,17 @@ bool Backend::start() {
         return false;
     }
 
+    // Pull-only at startup — there's nothing local to publish yet — so the
+    // very first thing the editor shows is the freshest cross-machine
+    // content, conflict markers included if a real conflict is waiting.
+    bool conflict = false;
+    if (!m_store.pullFromRemote(&conflict)) {
+        if (conflict)
+            fail(QStringLiteral("sync"), m_store.errorString());
+        else
+            m_store.logError(m_store.errorString());
+    }
+
     bool ok = false;
     m_pendingText = m_store.load(&ok);
     if (!ok) {
@@ -82,6 +93,7 @@ void Backend::onCommitTimeout() {
     if (committed) {
         m_uncommitted = false;
         setStatus(QStringLiteral("synced"));
+        syncAfterCommit();
     }
 }
 
@@ -103,6 +115,50 @@ void Backend::save() {
     }
     m_uncommitted = false;
     setStatus(QStringLiteral("saved"));
+    syncAfterCommit();
+}
+
+void Backend::syncAfterCommit() {
+    if (!m_store.hasRemote())
+        return;
+
+    bool conflict = false;
+    const bool pullOk = m_store.pullFromRemote(&conflict);
+    // Reload regardless of outcome: a pull can change the file on disk even
+    // when it fails midway (a merge conflict included) or partially — the
+    // in-memory buffer must never silently overwrite that on the next
+    // autosave.
+    reloadIfChanged();
+
+    if (!pullOk) {
+        if (conflict) {
+            fail(QStringLiteral("sync"), m_store.errorString());
+        } else {
+            m_store.logError(m_store.errorString());
+            setStatus(QStringLiteral("offline"));
+        }
+        return;
+    }
+
+    if (!m_store.pushToRemote()) {
+        m_store.logError(m_store.errorString());
+        setStatus(QStringLiteral("offline"));
+        return;
+    }
+
+    setStatus(QStringLiteral("synced"));
+}
+
+void Backend::reloadIfChanged() {
+    bool ok = false;
+    const QString content = m_store.load(&ok);
+    if (!ok || content == m_pendingText)
+        return;
+
+    m_pendingText = content;
+    m_unsaved = false;
+    m_uncommitted = false;
+    emit textReloaded(content);
 }
 
 void Backend::dismissError() {

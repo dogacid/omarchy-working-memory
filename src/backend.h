@@ -68,6 +68,13 @@ private:
     void fail(const QString &context, const QString &detail);
     void loadOmarchyTheme();
     void watchOmarchyTheme();
+    // Best-effort pull-then-push against origin, piggybacked on the
+    // existing save/commit debounce points — a silent no-op with no remote
+    // configured. Reloads the editor if a pull changed the file on disk (see
+    // reloadIfChanged()) so a background merge/conflict is never silently
+    // clobbered by the next autosave.
+    void syncAfterCommit();
+    void reloadIfChanged();
 
     GitStore m_store;
     QString m_pendingText;
