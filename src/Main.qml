@@ -68,6 +68,18 @@ ApplicationWindow {
         editor.forceActiveFocus();
     }
 
+    // Alt+D / Alt+T: quick timestamp stamps into the note, bracketed so
+    // they read as inline markers rather than blending into prose.
+    function pad2(n) { return n < 10 ? "0" + n : "" + n; }
+    function insertDate() {
+        const d = new Date();
+        editor.insert(editor.cursorPosition, "[" + d.getFullYear() + "-" + win.pad2(d.getMonth() + 1) + "-" + win.pad2(d.getDate()) + "]");
+    }
+    function insertDateTime() {
+        const d = new Date();
+        editor.insert(editor.cursorPosition, "[" + d.getFullYear() + "-" + win.pad2(d.getMonth() + 1) + "-" + win.pad2(d.getDate()) + " " + win.pad2(d.getHours()) + ":" + win.pad2(d.getMinutes()) + "]");
+    }
+
     // --- Vim-style visual selection in the history preview ---------------
     // v/V starts it (anchored at the top of the text), h/j/k/l or the
     // arrow keys move the cursor and extend the selection, y or Ctrl+C/
@@ -115,6 +127,8 @@ ApplicationWindow {
     // real shift-arrow/word/mouse selection built in.
     Shortcut { sequence: "Ctrl+S"; enabled: win.mode === "edit"; onActivated: backend.save() }
     Shortcut { sequence: "Ctrl+R"; onActivated: win.mode === "edit" ? win.openHistory() : win.backToEdit() }
+    Shortcut { sequence: "Alt+D"; enabled: win.mode === "edit"; onActivated: win.insertDate() }
+    Shortcut { sequence: "Alt+T"; enabled: win.mode === "edit"; onActivated: win.insertDateTime() }
     // Disabled while visual-selecting: Esc there means "cancel the
     // selection" (handled in previewArea's own Keys.onPressed below), not
     // "leave history" — a second Esc after that falls through to this one.
@@ -370,7 +384,7 @@ ApplicationWindow {
                     elide: Text.ElideRight
                     text: {
                         if (win.mode === "edit")
-                            return "ctrl+r history · ctrl+s save · select text + ctrl+c/super+c to copy";
+                            return "ctrl+r history · ctrl+s save · alt+d date · alt+t date+time · select text + ctrl+c/super+c to copy";
                         if (win.previewSelMode !== "none")
                             return "h/j/k/l move · y/ctrl+c/super+c yank · esc cancel selection";
                         return "j/k/↑/↓ move · / search · v/V visual select · enter restore · esc back";
