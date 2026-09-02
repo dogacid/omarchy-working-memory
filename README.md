@@ -180,9 +180,13 @@ piggybacks on the existing save/commit flow: a pull happens the moment the
 window opens, and a pull-then-push happens after every autosave commit
 (~20s after you stop typing) and after `Ctrl+S`, plus a background check
 every 5 minutes so a window left open but idle still picks up another
-machine's changes. All of it runs on a background thread — typing and
-`Ctrl+S` never wait on the network, however slow or unreachable the remote
-is.
+machine's changes. That same 5-minute check also self-heals: if a commit
+ever fails to complete on its own (a missed timer, the machine having
+suspended mid-cycle, anything), the periodic check notices and retries it,
+so nothing can stay stuck un-synced for longer than one interval — `Ctrl+S`
+always forces it immediately if you don't want to wait. All of it runs on a
+background thread — typing and `Ctrl+S` never wait on the network, however
+slow or unreachable the remote is.
 
 The status word in the footer picks up two new values: `syncing…` while a
 pull/push is actually in flight — lazygit-style feedback, so opening the

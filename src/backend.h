@@ -90,6 +90,13 @@ private:
     // unsaved/uncommitted local work in progress (never risk clobbering
     // that — see reloadIfChanged()).
     void triggerSync();
+    // The periodic timer's actual slot. m_uncommitted staying stuck true
+    // (for any reason — a missed timer, a suspend/resume gap, anything)
+    // would otherwise block triggerSync() forever, since it deliberately
+    // refuses to sync over unsaved/uncommitted work; this is the self-heal
+    // that notices and retries the commit instead of just trying to sync
+    // around it, so nothing can stay stuck longer than one interval.
+    void periodicCheck();
     void reloadIfChanged();
 
     GitStore m_store;

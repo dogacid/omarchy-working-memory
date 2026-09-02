@@ -26,7 +26,7 @@ Backend::Backend(QObject *parent) : QObject(parent) {
     m_periodicSyncTimer.setInterval(kPeriodicSyncMs);
     connect(&m_saveTimer, &QTimer::timeout, this, &Backend::onSaveTimeout);
     connect(&m_commitTimer, &QTimer::timeout, this, &Backend::onCommitTimeout);
-    connect(&m_periodicSyncTimer, &QTimer::timeout, this, &Backend::triggerSync);
+    connect(&m_periodicSyncTimer, &QTimer::timeout, this, &Backend::periodicCheck);
     connect(&m_syncWatcher, &QFutureWatcher<GitStore::SyncOutcome>::finished, this, &Backend::onSyncFinished);
     connect(&m_themeWatcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &) {
         loadOmarchyTheme();
@@ -167,6 +167,21 @@ void Backend::triggerSync() {
         return;
     setStatus(QStringLiteral("syncing…"));
     m_syncWatcher.setFuture(QtConcurrent::run([this] { return m_store.syncWithRemote(); }));
+}
+
+void Backend::periodicCheck() {
+    if (m_unsaved)
+        return; // mid-edit — leave it alone, the save/commit chain owns this
+    if (m_uncommitted) {
+        // Self-heal: whatever kept this from committing on its own (a
+        // missed timer, a suspend/resume gap, anything), retry it here
+        // rather than leaving triggerSync() permanently blocked by
+        // m_uncommitted — attemptCommit() calls triggerSync() itself once
+        // it actually succeeds, so this still ends in a sync when it works.
+        attemptCommit();
+        return;
+    }
+    triggerSync();
 }
 
 void Backend::onSyncFinished() {
