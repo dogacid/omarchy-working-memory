@@ -28,6 +28,17 @@ ApplicationWindow {
     property string previewSelMode: "none"
     property int previewAnchor: 0
 
+    // Same idea, but live-editable: "insert" (normal typing, the default)
+    // | "normal" (vim Normal mode, entered via Esc) | "visual" (v) |
+    // "visualLine" (V). editorAnchor is the fixed end of a visual
+    // selection, mirroring previewAnchor/previewSelMode above.
+    property string editorMode: "insert"
+    property int editorAnchor: 0
+    // True right after a single "d" in Normal mode, waiting to see if the
+    // next key completes "dd" — reset on any other key or mode change.
+    property bool pendingD: false
+    property bool showHelp: false
+
     onClosing: backend.save()
 
     function openHistory() {
@@ -149,6 +160,85 @@ ApplicationWindow {
         win.exitVisualMode();
     }
 
+    // --- Vim-style Normal/Visual mode in the live editor ------------------
+    // Esc (from Insert) enters Normal mode; i returns to Insert. Same
+    // anchor/cursor selection model as the history preview above, just
+    // against the editable buffer, so v/V/h/j/k/l/y all behave the same
+    // way — plus dd and D, which the read-only preview has no need for.
+    function enterEditorNormalMode() {
+        win.editorMode = "normal";
+        win.pendingD = false;
+    }
+    function enterEditorInsertMode() {
+        win.editorMode = "insert";
+        win.pendingD = false;
+        editor.deselect();
+    }
+    function enterEditorVisual(kind) {
+        win.editorMode = kind;
+        win.editorAnchor = editor.cursorPosition;
+        win.pendingD = false;
+        win.updateEditorSelection();
+    }
+    function updateEditorSelection() {
+        const a = win.editorAnchor, c = editor.cursorPosition;
+        if (win.editorMode === "visualLine") {
+            const text = editor.text;
+            const lo = Math.min(a, c), hi = Math.max(a, c);
+            const lineStart = text.lastIndexOf("\n", lo - 1) + 1;
+            const nlAfter = text.indexOf("\n", hi);
+            editor.select(lineStart, nlAfter === -1 ? text.length : nlAfter);
+        } else if (win.editorMode === "visual") {
+            editor.select(Math.min(a, c), Math.max(a, c));
+        }
+    }
+    function yankEditorSelection() {
+        if (editor.selectedText) backend.copyToClipboard(editor.selectedText);
+        editor.deselect();
+        win.enterEditorNormalMode();
+    }
+    function deleteEditorSelection() {
+        if (editor.selectedText) {
+            backend.copyToClipboard(editor.selectedText);
+            editor.remove(editor.selectionStart, editor.selectionEnd);
+        }
+        win.enterEditorNormalMode();
+    }
+    // dd: delete the whole current line (its trailing newline included, so
+    // the document doesn't grow a blank line) and yank the line's text.
+    // Deleting the last line also eats the *preceding* newline instead, so
+    // it doesn't leave a dangling blank line at the end either.
+    function deleteCurrentLine() {
+        const text = editor.text;
+        const pos = editor.cursorPosition;
+        const lineStart = text.lastIndexOf("\n", pos - 1) + 1;
+        const nlAfter = text.indexOf("\n", pos);
+        let removeStart = lineStart, removeEnd, clip;
+        if (nlAfter === -1) {
+            clip = text.slice(lineStart);
+            removeEnd = text.length;
+            if (lineStart > 0) removeStart = lineStart - 1;
+        } else {
+            clip = text.slice(lineStart, nlAfter);
+            removeEnd = nlAfter + 1;
+        }
+        if (clip) backend.copyToClipboard(clip);
+        editor.remove(removeStart, removeEnd);
+        editor.cursorPosition = Math.min(removeStart, editor.text.length);
+    }
+    // D: delete from the cursor to the end of the current line (not
+    // including its newline) and yank what was removed.
+    function deleteToEndOfLine() {
+        const text = editor.text;
+        const pos = editor.cursorPosition;
+        let lineEnd = text.indexOf("\n", pos);
+        if (lineEnd === -1) lineEnd = text.length;
+        if (lineEnd > pos) {
+            backend.copyToClipboard(text.slice(pos, lineEnd));
+            editor.remove(pos, lineEnd);
+        }
+    }
+
     // Global shortcuts. Ctrl+E (drop to a real editor for selection) is
     // gone entirely now that the editor is a native QQuickTextArea with
     // real shift-arrow/word/mouse selection built in.
@@ -169,12 +259,22 @@ ApplicationWindow {
     // selection" (handled in previewArea's own Keys.onPressed below), not
     // "leave history" — a second Esc after that falls through to this one.
     Shortcut { sequence: "Escape"; enabled: win.mode !== "edit" && win.previewSelMode === "none"; onActivated: win.backToEdit() }
+    // Esc from Insert mode enters vim Normal mode. Once editorMode has left
+    // "insert", the editor's own Keys.onPressed (below) handles Esc itself
+    // (cancel visual / already-normal no-op) — this Shortcut is disabled at
+    // that point so the two never race for the same keypress.
+    Shortcut { sequence: "Escape"; enabled: win.mode === "edit" && win.editorMode === "insert"; onActivated: win.enterEditorNormalMode() }
 
     Connections {
         target: backend
         function onTextReloaded(text) {
             editor.text = text;
             editor.cursorPosition = text.length;
+            // The content just got replaced wholesale (a restore, or a
+            // background sync pulling in another machine's edit) — any
+            // Normal/Visual-mode selection would now be pointing at
+            // content that no longer exists, so drop back to Insert.
+            win.enterEditorInsertMode();
         }
     }
 
@@ -214,6 +314,58 @@ ApplicationWindow {
                     forceActiveFocus();
                 }
                 onTextChanged: if (loaded) backend.noteEdited(text)
+
+                // Vim Normal/Visual mode — see the functions above for the
+                // model this mirrors from the history preview. Only active
+                // once editorMode leaves "insert" (Esc), so plain typing is
+                // completely untouched the rest of the time. Every key here
+                // is swallowed (event.accepted = true) once out of Insert
+                // mode, recognized or not — an unmapped Normal-mode key
+                // must never fall through and get typed as literal text.
+                Keys.onPressed: function (event) {
+                    if (win.editorMode === "insert") return;
+                    event.accepted = true;
+
+                    if (win.showHelp) {
+                        if (event.key === Qt.Key_Escape || event.text === "?") win.showHelp = false;
+                        return;
+                    }
+
+                    if (event.key === Qt.Key_Escape) {
+                        editor.deselect();
+                        win.enterEditorNormalMode();
+                        return;
+                    }
+
+                    if (win.editorMode === "visual" || win.editorMode === "visualLine") {
+                        if (event.text === "y") { win.yankEditorSelection(); return; }
+                        if (event.text === "d" || event.text === "x") { win.deleteEditorSelection(); return; }
+                        else if (event.key === Qt.Key_Left || event.text === "h") editor.cursorPosition = Math.max(0, editor.cursorPosition - 1);
+                        else if (event.key === Qt.Key_Right || event.text === "l") editor.cursorPosition = Math.min(editor.text.length, editor.cursorPosition + 1);
+                        else if (event.key === Qt.Key_Down || event.text === "j") { const r = editor.cursorRectangle; editor.cursorPosition = editor.positionAt(r.x, r.y + r.height * 1.5); }
+                        else if (event.key === Qt.Key_Up || event.text === "k") { const r = editor.cursorRectangle; editor.cursorPosition = editor.positionAt(r.x, r.y - r.height * 0.5); }
+                        else return;
+                        win.updateEditorSelection();
+                        return;
+                    }
+
+                    // Normal mode.
+                    if (event.text === "?") { win.showHelp = true; win.pendingD = false; return; }
+                    if (event.text === "i") { win.enterEditorInsertMode(); return; }
+                    if (event.text === "v") { win.enterEditorVisual("visual"); return; }
+                    if (event.text === "V") { win.enterEditorVisual("visualLine"); return; }
+                    if (event.text === "D") { win.deleteToEndOfLine(); win.pendingD = false; return; }
+                    if (event.text === "d") {
+                        if (win.pendingD) { win.deleteCurrentLine(); win.pendingD = false; }
+                        else win.pendingD = true;
+                        return;
+                    }
+                    if (event.key === Qt.Key_Left || event.text === "h") editor.cursorPosition = Math.max(0, editor.cursorPosition - 1);
+                    else if (event.key === Qt.Key_Right || event.text === "l") editor.cursorPosition = Math.min(editor.text.length, editor.cursorPosition + 1);
+                    else if (event.key === Qt.Key_Down || event.text === "j") { const r = editor.cursorRectangle; editor.cursorPosition = editor.positionAt(r.x, r.y + r.height * 1.5); }
+                    else if (event.key === Qt.Key_Up || event.text === "k") { const r = editor.cursorRectangle; editor.cursorPosition = editor.positionAt(r.x, r.y - r.height * 0.5); }
+                    win.pendingD = false; // any key other than the first "d" cancels a pending dd
+                }
             }
         }
 
@@ -419,8 +571,13 @@ ApplicationWindow {
                     font.pixelSize: 12
                     elide: Text.ElideRight
                     text: {
-                        if (win.mode === "edit")
-                            return "ctrl+r history · ctrl+s save · alt+d date · alt+t date+time · ctrl+1-9 jump headings · select text + ctrl+c/super+c to copy";
+                        if (win.mode === "edit") {
+                            if (win.editorMode === "insert")
+                                return "esc vim mode · ctrl+s save · ? help";
+                            const label = win.editorMode === "visualLine" ? "VISUAL LINE"
+                                : win.editorMode === "visual" ? "VISUAL" : "NORMAL";
+                            return "-- " + label + " --" + (win.pendingD ? "  d" : "") + "   ?  help";
+                        }
                         if (win.previewSelMode !== "none")
                             return "h/j/k/l move · y/ctrl+c/super+c yank · esc cancel selection";
                         return "j/k/↑/↓ move · / search · v/V visual select · enter restore · esc back";
@@ -486,5 +643,116 @@ ApplicationWindow {
 
         Shortcut { sequence: "Escape"; enabled: backend.lastError !== ""; onActivated: backend.dismissError() }
         Shortcut { sequence: "Return"; enabled: backend.lastError !== ""; onActivated: backend.dismissError() }
+    }
+
+    // --- Help overlay ("?" from vim Normal mode) ---------------------------
+    // A quick reference, not a blocking error: a centered card over a
+    // dimmed backdrop, dismissed the same way it's opened (? or Esc — see
+    // the editor's Keys.onPressed). Everything that used to be spelled out
+    // in the footer lives here now, so the footer itself can stay short.
+    Rectangle {
+        anchors.fill: parent
+        visible: win.showHelp
+        color: Qt.rgba(0, 0, 0, 0.5)
+        z: 9
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(560, parent.width - 80)
+            height: Math.min(helpColumn.implicitHeight + 40, parent.height - 80)
+            color: backend.themeBackground
+            border.color: backend.themeMuted
+            border.width: 1
+            radius: 6
+            clip: true
+
+            Flickable {
+                anchors.fill: parent
+                anchors.margins: 20
+                contentHeight: helpColumn.implicitHeight
+                clip: true
+
+                Column {
+                    id: helpColumn
+                    width: parent.width
+                    spacing: 10
+
+                    Text {
+                        text: "Keyboard shortcuts"
+                        font.bold: true
+                        font.pixelSize: 16
+                        color: backend.themeForeground
+                    }
+
+                    Repeater {
+                        model: [
+                            { title: "General", items: [
+                                { key: "Ctrl+S", desc: "Save + commit immediately (forces a sync too)" },
+                                { key: "Ctrl+R", desc: "Open history (time machine)" },
+                                { key: "Alt+D", desc: "Insert today's date" },
+                                { key: "Alt+T", desc: "Insert date + time" },
+                                { key: "Ctrl+1..9", desc: "Jump to the Nth heading" },
+                                { key: "Esc", desc: "Enter vim Normal mode" }
+                            ]},
+                            { title: "Normal mode", items: [
+                                { key: "i", desc: "Back to Insert mode (resume typing)" },
+                                { key: "h j k l", desc: "Move the cursor (arrows too)" },
+                                { key: "v", desc: "Visual mode (character)" },
+                                { key: "V", desc: "Visual line mode" },
+                                { key: "dd", desc: "Delete the line (copied to clipboard)" },
+                                { key: "D", desc: "Delete to end of line (copied to clipboard)" },
+                                { key: "?", desc: "Toggle this help" }
+                            ]},
+                            { title: "Visual mode", items: [
+                                { key: "h j k l", desc: "Extend the selection" },
+                                { key: "y", desc: "Yank selection to clipboard" },
+                                { key: "d / x", desc: "Delete selection (copied to clipboard)" },
+                                { key: "Esc", desc: "Cancel, back to Normal mode" }
+                            ]}
+                        ]
+                        delegate: Column {
+                            width: helpColumn.width
+                            topPadding: index === 0 ? 0 : 10
+                            spacing: 6
+
+                            Text {
+                                text: modelData.title
+                                color: backend.themeAccent
+                                font.bold: true
+                                font.pixelSize: 13
+                            }
+                            Repeater {
+                                model: modelData.items
+                                delegate: Row {
+                                    width: helpColumn.width
+                                    spacing: 12
+                                    Text {
+                                        text: modelData.key
+                                        color: backend.themeForeground
+                                        font.family: "monospace"
+                                        font.bold: true
+                                        width: 90
+                                    }
+                                    Text {
+                                        text: modelData.desc
+                                        color: backend.themeMuted
+                                        width: parent.width - 102
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        topPadding: 6
+                        text: "esc or ? to close"
+                        color: backend.themeMuted
+                        font.pixelSize: 11
+                        font.italic: true
+                    }
+                }
+            }
+        }
     }
 }

@@ -146,11 +146,19 @@ void Backend::attemptCommit() {
         fail(QStringLiteral("commit"), m_store.errorString());
         return;
     }
-    if (committed) {
-        m_uncommitted = false;
+    // Clearing this unconditionally (not just inside the `if (committed)`
+    // branch below) matters: a commit() call that succeeds but finds
+    // nothing staged means there's genuinely nothing pending, whether or
+    // not m_uncommitted already agreed — so don't leave it stuck true.
+    m_uncommitted = false;
+    if (committed)
         setStatus(QStringLiteral("synced"));
-        triggerSync();
-    }
+    // Always worth a sync attempt here, even when nothing was just
+    // committed: this is what makes Ctrl+S double as a manual "check for
+    // updates now" — pressing it with nothing new to save still forces a
+    // pull, for when you know something's waiting on the remote and don't
+    // want to wait for the next debounce/periodic cycle.
+    triggerSync();
 }
 
 void Backend::triggerSync() {

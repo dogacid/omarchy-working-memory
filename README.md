@@ -101,14 +101,46 @@ Re-running it after a `git pull` picks up any update — it's idempotent.
 |-----------------------|-------------------------------------------|
 | `Ctrl+C` / `Super+C`  | Copy selection (or `Ctrl+V`/`Super+V` to paste) |
 | `Ctrl+R`              | Open history (time machine)               |
-| `Ctrl+S`              | Save + commit immediately                 |
+| `Ctrl+S`              | Save + commit immediately — and force a sync even if there was nothing new to save (see below) |
 | `Alt+D`               | Insert today's date as `[YYYY-MM-DD]`     |
 | `Alt+T`               | Insert date + time as `[YYYY-MM-DD HH:MM]` (24h) |
 | `Ctrl+1`..`Ctrl+9`     | Jump to the Nth heading in the note        |
+| `Esc`                 | Enter vim Normal mode (see below); `?` once there for the full shortcut reference |
 
 Otherwise it's a normal text field — click-drag or `Shift`+arrows to select,
 double/triple-click for word/line, everything you'd expect. Saving happens
 automatically ~1s after you stop typing, with a git commit ~20s after that.
+
+`Ctrl+S` always also forces a sync attempt, even when there's nothing new to
+save — the normal debounced/periodic sync only ever runs off your own
+edits, so this is how you manually say "check the remote right now" when
+you know something's waiting to come down (e.g. you just edited on another
+machine and don't want to wait for the next cycle).
+
+### Vim mode (`Esc`, then `?` for the full list)
+
+`Esc` drops the editor into a lightweight vim-style Normal mode — a few
+familiar commands, not a full vim emulation:
+
+| Key       | Where          | Action                                    |
+|-----------|----------------|--------------------------------------------|
+| `i`       | Normal         | Back to Insert mode (resume typing)        |
+| `h`/`j`/`k`/`l`, arrows | Normal / Visual | Move the cursor (or extend the selection, in Visual) |
+| `v`       | Normal         | Visual mode (character)                    |
+| `V`       | Normal         | Visual line mode                           |
+| `dd`      | Normal         | Delete the current line, copied to the clipboard |
+| `D`       | Normal         | Delete to end of line, copied to the clipboard |
+| `y`       | Visual         | Yank the selection to the clipboard        |
+| `d` / `x` | Visual         | Delete the selection, copied to the clipboard |
+| `Esc`     | Visual         | Cancel, back to Normal                     |
+| `?`       | Normal         | Toggle a popup listing every shortcut in the app |
+
+The footer only ever shows a one-line hint plus the current mode
+(`NORMAL`/`VISUAL`/`VISUAL LINE`) — `?` is the actual reference, so the
+footer doesn't have to spell out every shortcut as more of them accumulate.
+A background sync reloading the note (or restoring from history) always
+drops back to Insert mode first, since a Visual selection can't mean
+anything once the underlying text has been replaced.
 
 ### Headings and jumping (`Ctrl+1`..`Ctrl+9`)
 
