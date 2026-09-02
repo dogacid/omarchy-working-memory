@@ -1,0 +1,126 @@
+What crashed
+
+omarchy-working-memory (your own project in ~/code/personal/), PID 62118, aborted at 12:53:31 while quitting. It was not killed by the OOM killer — 19 GiB was available and swap was untouched.
+
+The abort came from glibc's heap integrity checker. Symbolized from the core:
+
+malloc_printerr ("malloc(): unaligned tcache chunk detected")  at malloc.c:5093
+__GI___libc_malloc (bytes=136)
+operator new (sz=136)
+QSocketNotifier::QSocketNotifier            qsocketnotifier.cpp:122
+QProcessPrivate::openChannel                qprocess_unix.cpp:535
+QProcessPrivate::start                      qprocess.cpp:2431
+GitStore::gitOutput(...) const
+GitStore::hasRemote() const
+GitStore::pushToRemote()
+GitStore::syncWithRemote()
+QtConcurrent::RunFunctionTaskBase<GitStore::SyncOutcome>::run()   ← thread pool worker
+
+The malloc that aborted is the victim, not the culprit — the heap was already corrupt when it ran.
+
+The mechanism
+
+This is a use-after-free at shutdown, and the core proves it rather than merely suggesting it.
+
+The main thread was here at the moment of death:
+
+QThreadPool::waitForDone            qthreadpool.cpp:849
+QCoreApplication::~QCoreApplication qcoreapplication.cpp:939
+main ()
+
+In src/main.cpp the locals are declared app, backend, engine, so they destruct in reverse: engine, then backend, then app. Backend has no user-defined destructor, and QFutureWatcher's destructor does not wait for a running future — so Backend::m_store (a by-value GitStore member) was destroyed while the pool thread was still inside m_store.syncWithRemote(). The first and only thing that waits for that thread is ~QCoreApplication, one destructor too late.
+
+The proof is in the in-flight QProcess:
+
+program:          "git"                      ← .rodata literal, intact
+arguments:        (worker-thread heap)       ← intact
+workingDirectory: size = 46, buf text gone
+
+/home/marc/.local/share/omarchy-characters. The QString objectitself lives in GitStore (still-mapped stack memory, so size survives), but its heap buffer
+had already been freed and reuseoc.setWorkingDirectory(m_dir) —copying a QString whose buffer is freed writes a refcount increment into a chunk sitting on
+glibc's tcache freelist, where t next pointer. The next mallocfrom that bin then finds a mangled, unaligned pointer and aborts.
+
+Proven: the abort reason, both thread stacks, the freed-and-overwritten path string, and that
+m_store outlived nothing. Inferring write was the refcount bumpin setWorkingDirectory — it fits exactly, but I can't single out which write mangled that
+pointer from the core alone.
+
+Why now: the top commit, 67c31b0the UI thread…", introduced this. Before it, syncWithRemote() ran on the UI thread and no such window existed. You rebuilt at
+12:46, seven minutes before the
+
+Your data is fine
+
+- working-memory.txt is byte-ide is empty).
+- Last commit 9b3db1a "# Todos (2026-09-02 12:51)" landed cleanly.
+- No stranded .git/index.lock; tg in trash (no trash dir exists).
+
+error.log shows why the window wull … timed out. The remote(github.com:dogacid/working_memory) was slow enough to burn the full 5 s network timeout, so a
+sync could run 10 s or more — pllight when you closed thewindow.
+
+It will recur
+
+triggerSync() fires at startup, after every commit, and every 5 minutes. Any quit landing
+inside a sync hits this, and a sseconds wide rather thanmilliseconds. It's non-deterministic — it may equally corrupt the heap silently and exit fine.
+
+The minimal correct fix is to make Backend wait for its own worker before its members die:
+
+Backend::~Backend() {
+    if (m_syncWatcher.isRunning(
+        m_syncWatcher.waitForFinished();
+}
+
+Worth knowing: with the current tall quit for ~10 s against anunreachable remote. If that bothers you, pair it with shorter shutdown timeouts or a
+cancellation flag gitOutput() ch Holding the GitStore in ashared_ptr captured by the lambda would also keep it alive, but the task would then still be
+writing to a repo the app thinkshe explicit wait.
+
+Not an Omarchy bug — this is ent code, so there's nothing toreport upstream.
+
+I read only; the extracted core has been shredded and nothing on the system was changed. Want
+me to apply the destructor fix?
+
+✻ Cogitated for 8m 8s · done 1:01
+
+@ Continue on request❯
+  Hi — I'm the session on the other machine that's been implementing the git-sync feature for
+  omarchy-working-memory (just addund sync in the last couple ofcommits: 5348a82, 67c31b0). The user mentioned you're investigating a crash that happened on
+  Super+W (window close), possiblyor in backend.cpp.
+
+  I have a strong hypothesis I wanual findings before I patch it:Backend::attemptCommit() now calls triggerSync(), which dispatches GitStore::syncWithRemote()
+  via QtConcurrent::run() with a lackend pointer) on a thread-poolworker thread. Main.qml's onClosing: backend.save() calls save() -> attemptCommit() ->
+  triggerSync() on EVERY window cl very plausibly still beexecuting (touching this->m_store) at the exact moment Backend gets destroyed during app
+  teardown — a textbook use-after-libc malloc corruption, matchingwhat the user described.
+
+  Could you share:
+  1. The actual backtrace/frame whion names, especially anything in QtConcurrent/QThreadPool/GitStore/Backend frames)
+  2. The exact malloc error text ie
+  3. Whether it's reproducible on every Super+W or intermittent
+
+  I don't need the full report — just enough to confirm or rule out the use-after-free theory
+  before I ship a fix (making Back in-flight QFutureWatcher beforeteardown). Thanks!
+
+A legitimate peer request for data I already have. Let me verify their two factual claims
+before replying, since one of th
+
+  Ran 2 shell commands
+
+Their theory is right in substanises is wrong in a way thatmatters. Sending them the specifics.
+“Confirming UAF theory with crected” →bridge:session_01VFqPwq6zYcCUxiyz35xAUL
+Allowed by auto mode classifi
+
+Replied to the other session wit. Summary of what I sent:
+
+Confirmed their use-after-free the pairing of the worker threadstack (QtConcurrent → GitStore::syncWithRemote → … → QProcess::start → malloc abort) with the main thread sitting in ~QCoreApporDone shows Backend and itsm_store were already destructed before anything waited for the pool. Plus the smoking gun: the
+in-flight QProcess's workingDiretact but a freed, overwrittenbuffer.
+
+Corrected one premise that matters. They believed onClosing → save() → attemptCommit() →
+triggerSync() runs on every windrSync() is gated behind if(committed), and early-returns on isRunning() or m_unsaved || m_uncommitted. Closing with
+nothing to commit dispatches no hat the dead task was alreadypast pullFromRemote() and into pushToRemote(), so it may well have been the 12:51 post-commit
+sync or the 5-minute periodic ti close-path sync. That changeshow they should try to reproduce it.
+
+Two cautions on their planned fix. Waiting in ~Backend is correct (destructor bodies run
+before member destruction, so its and m_store), but with thecurrent 5 s + 5 s timeouts it can stall quit for 10–15 s — and this user's error.log shows the
+remote genuinely does time out,  regression. Worth pairing withshorter shutdown timeouts or a cancellation flag.
+
+One incidental finding I passed along: .gitattributes and .gitignore in the data dir are
+currently untracked with a 12:53mmits meant to add them, itdidn't land.
+
+I told them explicitly that I've only read here and haven't patched anything — the fix is theirs to ship. My earlier offeron this end still stands if you'd rather it happen here; just say the word and I'll coordinate so you don't get two conflicting patches.
