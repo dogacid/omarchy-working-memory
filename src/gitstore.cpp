@@ -32,13 +32,13 @@ bool GitStore::open() {
     m_path = m_dir + QLatin1Char('/') + QLatin1String(kFileName);
 
     if (!QDir().mkpath(m_dir)) {
-        m_error = QStringLiteral("create data dir: ") + m_dir;
+        setError(QStringLiteral("create data dir: ") + m_dir);
         return false;
     }
 
     if (!QDir(m_dir + QStringLiteral("/.git")).exists()) {
         if (!git({QStringLiteral("init"), QStringLiteral("-q")})) {
-            m_error = QStringLiteral("git init: ") + m_error;
+            setError(QStringLiteral("git init: ") + errorString());
             return false;
         }
         ensureIdentity();
@@ -49,7 +49,7 @@ bool GitStore::open() {
     if (!QFile::exists(m_path)) {
         QFile f(m_path);
         if (!f.open(QIODevice::WriteOnly)) {
-            m_error = QStringLiteral("create note file: ") + f.errorString();
+            setError(QStringLiteral("create note file: ") + f.errorString());
             return false;
         }
         f.close();
@@ -65,11 +65,38 @@ bool GitStore::open() {
         }
     }
 
+    // A union merge driver for the note: on any conflicting hunk, git keeps
+    // *both* sides concatenated instead of leaving <<<<<<< markers to
+    // resolve by hand. This is what makes syncing smooth rather than
+    // error-prone — most importantly for the very first sync on a machine
+    // that already had local history before a remote existed, which is
+    // otherwise an "unrelated histories" merge that can conflict across
+    // nearly the whole file. Nothing is ever lost this way, only
+    // occasionally duplicated, which is the right trade for a mostly-append
+    // scratchpad. Written on every open() (not just when missing) so an
+    // existing install picks this up on upgrade without the user doing
+    // anything.
+    const QString gitattributes = m_dir + QStringLiteral("/.gitattributes");
+    QFile attrFile(gitattributes);
+    if (attrFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        attrFile.write(QByteArray(kFileName) + " merge=union\n");
+    }
+
     return true;
 }
 
 QString GitStore::logPath() const {
     return m_dir + QLatin1Char('/') + QLatin1String(kErrorLogName);
+}
+
+QString GitStore::errorString() const {
+    QMutexLocker locker(&m_errorMutex);
+    return m_error;
+}
+
+void GitStore::setError(const QString &error) const {
+    QMutexLocker locker(&m_errorMutex);
+    m_error = error;
 }
 
 QString GitStore::load(bool *ok) const {
@@ -89,12 +116,12 @@ bool GitStore::save(const QString &content) {
     // leaves a truncated note file.
     QSaveFile f(m_path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        m_error = f.errorString();
+        setError(f.errorString());
         return false;
     }
     f.write(content.toUtf8());
     if (!f.commit()) {
-        m_error = f.errorString();
+        setError(f.errorString());
         return false;
     }
     return true;
@@ -111,21 +138,21 @@ bool GitStore::commitWithMessage(const QString &message, bool *committed) {
     if (committed) *committed = false;
 
     if (!git({QStringLiteral("add"), QLatin1String(kFileName)})) {
-        m_error = QStringLiteral("git add: ") + m_error;
+        setError(QStringLiteral("git add: ") + errorString());
         return false;
     }
 
     bool ok = false;
     const QString diff = gitOutput({QStringLiteral("diff"), QStringLiteral("--cached"), QStringLiteral("--name-only")}, &ok);
     if (!ok) {
-        m_error = QStringLiteral("git diff: ") + m_error;
+        setError(QStringLiteral("git diff: ") + errorString());
         return false;
     }
     if (diff.trimmed().isEmpty())
         return true; // nothing to commit — not a failure
 
     if (!git({QStringLiteral("commit"), QStringLiteral("-q"), QStringLiteral("-m"), message})) {
-        m_error = QStringLiteral("git commit: ") + m_error;
+        setError(QStringLiteral("git commit: ") + errorString());
         return false;
     }
     if (committed) *committed = true;
@@ -177,7 +204,7 @@ bool GitStore::restoreAt(const QString &hash, const QDateTime &at) {
     bool ok = false;
     const QString content = showAt(hash, &ok);
     if (!ok) {
-        m_error = QStringLiteral("git show: ") + m_error;
+        setError(QStringLiteral("git show: ") + errorString());
         return false;
     }
     if (!save(content))
@@ -197,6 +224,26 @@ bool GitStore::hasRemote() const {
     return remotes.contains(QStringLiteral("origin"));
 }
 
+GitStore::SyncOutcome GitStore::syncWithRemote() {
+    SyncOutcome outcome;
+    if (!hasRemote())
+        return outcome; // ranSync stays false: no remote configured, nothing to do
+    outcome.ranSync = true;
+
+    bool conflict = false;
+    if (!pullFromRemote(&conflict)) {
+        outcome.conflict = conflict;
+        outcome.error = errorString();
+        return outcome;
+    }
+    if (!pushToRemote()) {
+        outcome.error = errorString();
+        return outcome;
+    }
+    outcome.ok = true;
+    return outcome;
+}
+
 bool GitStore::pullFromRemote(bool *conflict) {
     if (conflict) *conflict = false;
     if (!hasRemote())
@@ -205,7 +252,7 @@ bool GitStore::pullFromRemote(bool *conflict) {
     bool branchOk = false;
     const QString branch = currentBranch(&branchOk);
     if (!branchOk) {
-        m_error = QStringLiteral("git branch: ") + m_error;
+        setError(QStringLiteral("git branch: ") + errorString());
         return false;
     }
 
@@ -219,7 +266,7 @@ bool GitStore::pullFromRemote(bool *conflict) {
     bool lsRemoteOk = false;
     const QString refs = gitOutput({QStringLiteral("ls-remote"), QStringLiteral("origin"), branch}, &lsRemoteOk, /*network=*/true);
     if (!lsRemoteOk) {
-        m_error = QStringLiteral("git ls-remote: ") + m_error;
+        setError(QStringLiteral("git ls-remote: ") + errorString());
         return false;
     }
     if (refs.trimmed().isEmpty())
@@ -256,9 +303,9 @@ bool GitStore::pullFromRemote(bool *conflict) {
     const QString unmerged = gitOutput({QStringLiteral("ls-files"), QStringLiteral("-u")}, &unmergedOk);
     if (unmergedOk && !unmerged.trimmed().isEmpty()) {
         if (conflict) *conflict = true;
-        m_error = QStringLiteral("sync conflict — resolve the markers in the note and save: ") + m_error;
+        setError(QStringLiteral("sync conflict — resolve the markers in the note and save: ") + errorString());
     } else {
-        m_error = QStringLiteral("git pull: ") + m_error;
+        setError(QStringLiteral("git pull: ") + errorString());
     }
     return false;
 }
@@ -270,12 +317,12 @@ bool GitStore::pushToRemote() {
     bool branchOk = false;
     const QString branch = currentBranch(&branchOk);
     if (!branchOk) {
-        m_error = QStringLiteral("git branch: ") + m_error;
+        setError(QStringLiteral("git branch: ") + errorString());
         return false;
     }
 
     if (!git({QStringLiteral("push"), QStringLiteral("origin"), branch}, /*network=*/true)) {
-        m_error = QStringLiteral("git push: ") + m_error;
+        setError(QStringLiteral("git push: ") + errorString());
         return false;
     }
     return true;
@@ -352,11 +399,11 @@ bool GitStore::git(const QStringList &args, bool network) const {
     if (!proc.waitForFinished(timeoutMs)) {
         proc.kill();
         proc.waitForFinished();
-        m_error = QStringLiteral("git ") + args.join(QLatin1Char(' ')) + QStringLiteral(" timed out");
+        setError(QStringLiteral("git ") + args.join(QLatin1Char(' ')) + QStringLiteral(" timed out"));
         return false;
     }
     if (proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0) {
-        m_error = QString::fromUtf8(proc.readAllStandardError()).trimmed();
+        setError(QString::fromUtf8(proc.readAllStandardError()).trimmed());
         return false;
     }
     return true;
@@ -376,13 +423,13 @@ QString GitStore::gitOutput(const QStringList &args, bool *ok, bool network) con
     if (!proc.waitForFinished(timeoutMs)) {
         proc.kill();
         proc.waitForFinished();
-        m_error = QStringLiteral("git ") + args.join(QLatin1Char(' ')) + QStringLiteral(" timed out");
+        setError(QStringLiteral("git ") + args.join(QLatin1Char(' ')) + QStringLiteral(" timed out"));
         if (ok) *ok = false;
         return QString();
     }
     const QString out = QString::fromUtf8(proc.readAllStandardOutput());
     if (proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0) {
-        m_error = QString::fromUtf8(proc.readAllStandardError()).trimmed();
+        setError(QString::fromUtf8(proc.readAllStandardError()).trimmed());
         if (ok) *ok = false;
         return out;
     }

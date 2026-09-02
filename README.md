@@ -173,18 +173,26 @@ git -C ~/.local/share/omarchy-working-memory remote add origin <url>
 (SSH recommended.) Nothing else to configure — sync piggybacks on the
 existing save/commit flow: a pull happens once when the app opens, and a
 pull-then-push happens after every autosave commit (~20s after you stop
-typing) and after `Ctrl+S`. The status word in the footer picks up one new
-value, `offline`, when a sync attempt can't reach the remote — your edits
-keep saving and committing locally regardless, exactly as if no remote were
-configured at all; it just hasn't reached `origin` yet and will on the next
-cycle.
+typing) and after `Ctrl+S`, plus a background check every 5 minutes so a
+window left open but idle still picks up another machine's changes. All of
+it runs on a background thread — typing and `Ctrl+S` never wait on the
+network, however slow or unreachable the remote is. The status word in the
+footer picks up one new value, `offline`, when a sync attempt can't reach
+the remote — your edits keep saving and committing locally regardless,
+exactly as if no remote were configured at all; it just hasn't reached
+`origin` yet and will on the next cycle.
 
-A real conflict (the same line edited on two machines before either could
-sync) is rare for a mostly-append note, but when it happens git leaves
-`<<<<<<<` conflict markers in the note itself and the app raises its normal
-full-screen error view once to flag it — dismiss it, edit the markers out
-like any git conflict, and the next ordinary save/commit finishes it, no
-special step required. Nothing is ever destructively lost either way: every
+Merges are configured as a **union merge** for the note (a `.gitattributes`
+entry the app writes itself): on any conflicting hunk, git keeps *both*
+sides rather than stopping to ask — including the very first sync on a
+machine that already had its own local history before a remote existed,
+which would otherwise be a whole-file "unrelated histories" conflict. So
+upgrading an existing install onto a populated remote just merges both
+notes' content together automatically; nothing is ever lost, only
+occasionally duplicated, which is the right trade for a mostly-append
+scratchpad — tidy up any duplication by hand at your leisure. The
+full-screen error view is reserved for the rare case a real conflict still
+can't auto-resolve. Nothing is ever destructively lost either way: every
 version from every machine stays in the log, reachable through `Ctrl+R`.
 
 The app never manages credentials or SSH keys itself — remote auth is

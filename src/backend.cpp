@@ -7,17 +7,27 @@
 #include <QGuiApplication>
 #include <QTextStream>
 #include <QVariantMap>
+#include <QtConcurrent>
 
 namespace {
 constexpr int kSaveDebounceMs = 1000;
 constexpr int kCommitDebounceMs = 20000;
+// How often an otherwise-idle window checks for cross-machine changes —
+// the debounced-commit/Ctrl+S sync only ever runs off your *own* edits, so
+// without this, a window left open but untouched would never learn about
+// another machine's changes. 5 minutes balances staying reasonably current
+// against not chattering the remote needlessly.
+constexpr int kPeriodicSyncMs = 5 * 60 * 1000;
 }
 
 Backend::Backend(QObject *parent) : QObject(parent) {
     m_saveTimer.setSingleShot(true);
     m_commitTimer.setSingleShot(true);
+    m_periodicSyncTimer.setInterval(kPeriodicSyncMs);
     connect(&m_saveTimer, &QTimer::timeout, this, &Backend::onSaveTimeout);
     connect(&m_commitTimer, &QTimer::timeout, this, &Backend::onCommitTimeout);
+    connect(&m_periodicSyncTimer, &QTimer::timeout, this, &Backend::triggerSync);
+    connect(&m_syncWatcher, &QFutureWatcher<GitStore::SyncOutcome>::finished, this, &Backend::onSyncFinished);
     connect(&m_themeWatcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &) {
         loadOmarchyTheme();
         watchOmarchyTheme();
@@ -34,17 +44,6 @@ bool Backend::start() {
         return false;
     }
 
-    // Pull-only at startup — there's nothing local to publish yet — so the
-    // very first thing the editor shows is the freshest cross-machine
-    // content, conflict markers included if a real conflict is waiting.
-    bool conflict = false;
-    if (!m_store.pullFromRemote(&conflict)) {
-        if (conflict)
-            fail(QStringLiteral("sync"), m_store.errorString());
-        else
-            m_store.logError(m_store.errorString());
-    }
-
     bool ok = false;
     m_pendingText = m_store.load(&ok);
     if (!ok) {
@@ -55,6 +54,13 @@ bool Backend::start() {
     loadOmarchyTheme();
     watchOmarchyTheme();
     setStatus(QStringLiteral("synced"));
+
+    // The window opens immediately with whatever's on disk; any
+    // cross-machine update pulled in behind it lands moments later via the
+    // same textReloaded path history-restore already uses — never worth
+    // delaying the window appearing for.
+    m_periodicSyncTimer.start();
+    triggerSync();
     return true;
 }
 
@@ -85,16 +91,7 @@ void Backend::onSaveTimeout() {
 void Backend::onCommitTimeout() {
     if (!m_uncommitted || m_unsaved)
         return;
-    bool committed = false;
-    if (!m_store.commit(&committed)) {
-        fail(QStringLiteral("commit"), m_store.errorString());
-        return;
-    }
-    if (committed) {
-        m_uncommitted = false;
-        setStatus(QStringLiteral("synced"));
-        syncAfterCommit();
-    }
+    attemptCommit();
 }
 
 void Backend::save() {
@@ -107,45 +104,64 @@ void Backend::save() {
     }
     m_unsaved = false;
     m_uncommitted = true;
+    setStatus(QStringLiteral("saved"));
+    attemptCommit();
+}
 
+void Backend::attemptCommit() {
     bool committed = false;
     if (!m_store.commit(&committed)) {
+        // A background sync (see triggerSync()) runs its own git processes
+        // on another thread now, so — unlike before this app had any
+        // threading at all — a local `git add`/`git commit` here can
+        // genuinely collide with an in-flight `git pull`'s index lock.
+        // That's transient and self-resolving, not a real failure worth
+        // alarming the user over: just retry shortly instead of raising
+        // the error overlay for it.
+        if (m_store.errorString().contains(QStringLiteral("index.lock"))) {
+            m_commitTimer.start(2000);
+            return;
+        }
         fail(QStringLiteral("commit"), m_store.errorString());
         return;
     }
-    m_uncommitted = false;
-    setStatus(QStringLiteral("saved"));
-    syncAfterCommit();
+    if (committed) {
+        m_uncommitted = false;
+        setStatus(QStringLiteral("synced"));
+        triggerSync();
+    }
 }
 
-void Backend::syncAfterCommit() {
-    if (!m_store.hasRemote())
+void Backend::triggerSync() {
+    if (m_syncWatcher.isRunning())
+        return; // already syncing — this cycle's changes ride along next time
+    // Never risk a pull-triggered reload clobbering keystrokes that aren't
+    // even saved to disk yet, or racing a commit that hasn't happened yet.
+    if (m_unsaved || m_uncommitted)
         return;
+    m_syncWatcher.setFuture(QtConcurrent::run([this] { return m_store.syncWithRemote(); }));
+}
 
-    bool conflict = false;
-    const bool pullOk = m_store.pullFromRemote(&conflict);
+void Backend::onSyncFinished() {
+    const GitStore::SyncOutcome outcome = m_syncWatcher.result();
+    if (!outcome.ranSync)
+        return; // no remote configured — matches pre-sync behavior exactly
+
     // Reload regardless of outcome: a pull can change the file on disk even
     // when it fails midway (a merge conflict included) or partially — the
     // in-memory buffer must never silently overwrite that on the next
     // autosave.
     reloadIfChanged();
 
-    if (!pullOk) {
-        if (conflict) {
-            fail(QStringLiteral("sync"), m_store.errorString());
-        } else {
-            m_store.logError(m_store.errorString());
-            setStatus(QStringLiteral("offline"));
-        }
+    if (outcome.conflict) {
+        fail(QStringLiteral("sync"), outcome.error);
         return;
     }
-
-    if (!m_store.pushToRemote()) {
-        m_store.logError(m_store.errorString());
+    if (!outcome.ok) {
+        m_store.logError(outcome.error);
         setStatus(QStringLiteral("offline"));
         return;
     }
-
     setStatus(QStringLiteral("synced"));
 }
 

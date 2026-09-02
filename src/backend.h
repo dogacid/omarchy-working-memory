@@ -4,6 +4,7 @@
 #include <QString>
 #include <QTimer>
 #include <QFileSystemWatcher>
+#include <QFutureWatcher>
 #include <QVariantList>
 
 #include "gitstore.h"
@@ -62,18 +63,26 @@ signals:
 private slots:
     void onSaveTimeout();
     void onCommitTimeout();
+    void onSyncFinished();
 
 private:
     void setStatus(const QString &status);
     void fail(const QString &context, const QString &detail);
     void loadOmarchyTheme();
     void watchOmarchyTheme();
-    // Best-effort pull-then-push against origin, piggybacked on the
-    // existing save/commit debounce points — a silent no-op with no remote
-    // configured. Reloads the editor if a pull changed the file on disk (see
-    // reloadIfChanged()) so a background merge/conflict is never silently
-    // clobbered by the next autosave.
-    void syncAfterCommit();
+    // Commits (git add + commit) and, once that succeeds, kicks off a sync.
+    // Shared by the debounced autosave path and Ctrl+S so both handle a
+    // transient index.lock collision with an in-flight background sync the
+    // same way: retry shortly, never raise the error overlay for it — see
+    // the .cpp for why that specific race can now happen at all.
+    void attemptCommit();
+    // Dispatches GitStore::syncWithRemote() onto a background thread (via
+    // QtConcurrent) so a slow or unreachable remote never blocks the UI
+    // thread — called after a local commit, periodically while idle, and
+    // once at startup. A no-op if a sync is already in flight or there's
+    // unsaved/uncommitted local work in progress (never risk clobbering
+    // that — see reloadIfChanged()).
+    void triggerSync();
     void reloadIfChanged();
 
     GitStore m_store;
@@ -84,6 +93,8 @@ private:
     QString m_lastError;
     QTimer m_saveTimer;
     QTimer m_commitTimer;
+    QTimer m_periodicSyncTimer;
+    QFutureWatcher<GitStore::SyncOutcome> m_syncWatcher;
 
     bool m_darkMode = true;
     QString m_themeBackground;

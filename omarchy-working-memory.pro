@@ -1,4 +1,4 @@
-QT += core gui qml quick quickcontrols2
+QT += core gui qml quick quickcontrols2 concurrent
 
 CONFIG += c++17 release
 TARGET = omarchy-working-memory
