@@ -175,17 +175,29 @@ git -C ~/.local/share/omarchy-working-memory remote add origin <url>
 (SSH recommended — see [GitHub_Sync.md](GitHub_Sync.md) for the concrete
 step-by-step if you're syncing through GitHub, including setting up a
 dedicated deploy key so an interactive-approval SSH agent, like 1Password's,
-doesn't stall the background sync.) Nothing else to configure — sync piggybacks on the
-existing save/commit flow: a pull happens once when the app opens, and a
-pull-then-push happens after every autosave commit (~20s after you stop
-typing) and after `Ctrl+S`, plus a background check every 5 minutes so a
-window left open but idle still picks up another machine's changes. All of
-it runs on a background thread — typing and `Ctrl+S` never wait on the
-network, however slow or unreachable the remote is. The status word in the
-footer picks up one new value, `offline`, when a sync attempt can't reach
-the remote — your edits keep saving and committing locally regardless,
-exactly as if no remote were configured at all; it just hasn't reached
-`origin` yet and will on the next cycle.
+doesn't stall the background sync.) Nothing else to configure — sync
+piggybacks on the existing save/commit flow: a pull happens the moment the
+window opens, and a pull-then-push happens after every autosave commit
+(~20s after you stop typing) and after `Ctrl+S`, plus a background check
+every 5 minutes so a window left open but idle still picks up another
+machine's changes. All of it runs on a background thread — typing and
+`Ctrl+S` never wait on the network, however slow or unreachable the remote
+is.
+
+The status word in the footer picks up two new values: `syncing…` while a
+pull/push is actually in flight — lazygit-style feedback, so opening the
+window shows it visibly working rather than leaving you to wonder whether
+anything happened — and `offline` when a sync attempt can't reach the
+remote. Either way your edits keep saving and committing locally
+regardless, exactly as if no remote were configured at all; a sync just
+hasn't reached `origin` yet and will on the next cycle.
+
+None of this is aggressive enough to be a concern for GitHub or any other
+host: it's the same plain `git fetch`/`pull`/`push` any developer runs by
+hand, at a cadence (once per open, once per edit, every 5 minutes at most)
+far below what git hosts are built to handle from a single user — nothing
+here polls a REST API, which is the kind of traffic that actually has tight
+rate limits.
 
 Merges are configured as a **union merge** for the note (a `.gitattributes`
 entry the app writes itself): on any conflicting hunk, git keeps *both*

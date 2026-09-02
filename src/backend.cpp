@@ -160,6 +160,12 @@ void Backend::triggerSync() {
     // even saved to disk yet, or racing a commit that hasn't happened yet.
     if (m_unsaved || m_uncommitted)
         return;
+    // hasRemote() is a fast, local, no-network git call — cheap enough to
+    // check synchronously here so a no-remote setup shows literally no
+    // status change, ever, exactly as before this existed.
+    if (!m_store.hasRemote())
+        return;
+    setStatus(QStringLiteral("syncing…"));
     m_syncWatcher.setFuture(QtConcurrent::run([this] { return m_store.syncWithRemote(); }));
 }
 

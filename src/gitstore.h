@@ -60,6 +60,11 @@ public:
 
     void logError(const QString &message) const;
 
+    // A fast, local, no-network check — safe to call synchronously from the
+    // UI thread (unlike syncWithRemote()) to decide whether a sync is worth
+    // showing a "syncing…" status for at all.
+    bool hasRemote() const;
+
     // Cross-machine sync against a plain `git remote` — absent by default,
     // so this is a silent no-op (ranSync=false) until the user runs
     // `git remote add origin <url>` in the data dir themselves. No
@@ -94,7 +99,6 @@ private:
     void ensureBranch(const QString &name);
     QString currentBranch(bool *ok) const;
     bool hasCommits() const;
-    bool hasRemote() const;
     // On failure, *conflict distinguishes a real merge conflict (needs the
     // user) from a routine failure like being offline (doesn't).
     bool pullFromRemote(bool *conflict = nullptr);
