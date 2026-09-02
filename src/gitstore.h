@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include <QList>
 #include <QMutex>
+#include <atomic>
 
 // GitStore owns the working-memory text file and the git repo that versions
 // it. Every operation shells out to the real `git` binary (via QProcess) —
@@ -70,6 +71,17 @@ public:
     // precisely so a slow/unreachable remote never blocks the UI thread.
     SyncOutcome syncWithRemote();
 
+    // Best-effort, not a hard abort: sets a flag checked between individual
+    // git invocations (before ls-remote/pull/push each start), so a sync
+    // already blocked inside one such call still runs to that call's own
+    // timeout — but won't go on to start the next one. Exists so Backend's
+    // destructor (which must wait for an in-flight sync — see its comment)
+    // isn't stuck for the full multi-call sequence (up to ~15s) against a
+    // slow/unreachable remote, just whichever single call is already
+    // running (up to ~5s). Call from any thread; intended for shutdown
+    // only, so there's no way to un-cancel.
+    void requestCancelSync();
+
 private:
     bool commitWithMessage(const QString &message, bool *committed);
     bool git(const QStringList &args, bool network = false) const;
@@ -87,6 +99,10 @@ private:
     // user) from a routine failure like being offline (doesn't).
     bool pullFromRemote(bool *conflict = nullptr);
     bool pushToRemote();
+    // Checked right before each network call in pullFromRemote()/
+    // pushToRemote(); sets an explanatory error and returns true once
+    // requestCancelSync() has been called.
+    bool syncCancelled() const;
     void setError(const QString &error) const;
     static QString previewLine(const QString &content);
     static QString shortHash(const QString &hash);
@@ -95,4 +111,5 @@ private:
     QString m_path;
     mutable QMutex m_errorMutex;
     mutable QString m_error;
+    std::atomic<bool> m_cancelSync{false};
 };

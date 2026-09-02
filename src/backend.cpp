@@ -38,6 +38,27 @@ Backend::Backend(QObject *parent) : QObject(parent) {
     });
 }
 
+Backend::~Backend() {
+    // main.cpp holds Backend as a plain stack variable in main(), destroyed
+    // the moment app.exec() returns. A background sync (see triggerSync())
+    // can still be in flight at that point — the debounced commit right
+    // before close, an earlier commit's sync that hasn't finished against a
+    // slow remote, or the 5-minute periodic check — and its QtConcurrent
+    // worker thread's `[this]`-capturing lambda would go on touching
+    // m_store after Backend itself is gone: a real, confirmed
+    // use-after-free (glibc tcache corruption), not a theoretical one.
+    //
+    // requestCancelSync() first, so this doesn't sit through the sync's
+    // full multi-call sequence (ls-remote, pull, push — up to ~15s against
+    // an unreachable remote): it stops the sync from *starting* its next
+    // network call, so the wait below is bounded by whichever single call
+    // is already running (up to ~5s), not the whole sequence.
+    if (m_syncWatcher.isRunning()) {
+        m_store.requestCancelSync();
+        m_syncWatcher.waitForFinished();
+    }
+}
+
 bool Backend::start() {
     if (!m_store.open()) {
         fail(QStringLiteral("start"), m_store.errorString());

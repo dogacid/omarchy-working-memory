@@ -244,6 +244,17 @@ GitStore::SyncOutcome GitStore::syncWithRemote() {
     return outcome;
 }
 
+void GitStore::requestCancelSync() {
+    m_cancelSync.store(true, std::memory_order_relaxed);
+}
+
+bool GitStore::syncCancelled() const {
+    if (!m_cancelSync.load(std::memory_order_relaxed))
+        return false;
+    setError(QStringLiteral("sync cancelled"));
+    return true;
+}
+
 bool GitStore::pullFromRemote(bool *conflict) {
     if (conflict) *conflict = false;
     if (!hasRemote())
@@ -255,6 +266,9 @@ bool GitStore::pullFromRemote(bool *conflict) {
         setError(QStringLiteral("git branch: ") + errorString());
         return false;
     }
+
+    if (syncCancelled())
+        return false;
 
     // A remote that's reachable but doesn't have this branch yet (a brand
     // new/empty remote — true for every machine's very first sync) isn't a
@@ -271,6 +285,9 @@ bool GitStore::pullFromRemote(bool *conflict) {
     }
     if (refs.trimmed().isEmpty())
         return true; // nothing on the remote yet — nothing to pull
+
+    if (syncCancelled())
+        return false;
 
     // open() creates working-memory.txt directly on disk, outside git, so on
     // a repo with no commits yet it always exists but untracked — and git
@@ -320,6 +337,9 @@ bool GitStore::pushToRemote() {
         setError(QStringLiteral("git branch: ") + errorString());
         return false;
     }
+
+    if (syncCancelled())
+        return false;
 
     if (!git({QStringLiteral("push"), QStringLiteral("origin"), branch}, /*network=*/true)) {
         setError(QStringLiteral("git push: ") + errorString());

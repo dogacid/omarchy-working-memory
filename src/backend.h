@@ -26,6 +26,13 @@ class Backend : public QObject {
 
 public:
     explicit Backend(QObject *parent = nullptr);
+    // Blocks until any in-flight background sync (see triggerSync()) has
+    // finished — required, not just tidy: main.cpp holds Backend as a stack
+    // variable, and a sync's worker thread captures `this` in its lambda.
+    // Without this, destroying Backend while that thread is still touching
+    // m_store is a use-after-free — see the .cpp for how directly this was
+    // hit (onClosing: backend.save() on every window close).
+    ~Backend() override;
 
     // Returns false (with lastError already set) if the store couldn't be
     // opened at all — the caller should refuse to start the UI in that case.
