@@ -170,7 +170,10 @@ works). One-time setup per machine, outside the app:
 git -C ~/.local/share/omarchy-working-memory remote add origin <url>
 ```
 
-(SSH recommended.) Nothing else to configure — sync piggybacks on the
+(SSH recommended — see [GitHub_Sync.md](GitHub_Sync.md) for the concrete
+step-by-step if you're syncing through GitHub, including setting up a
+dedicated deploy key so an interactive-approval SSH agent, like 1Password's,
+doesn't stall the background sync.) Nothing else to configure — sync piggybacks on the
 existing save/commit flow: a pull happens once when the app opens, and a
 pull-then-push happens after every autosave commit (~20s after you stop
 typing) and after `Ctrl+S`, plus a background check every 5 minutes so a
