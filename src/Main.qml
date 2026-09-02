@@ -80,16 +80,21 @@ ApplicationWindow {
         editor.insert(editor.cursorPosition, "[" + d.getFullYear() + "-" + win.pad2(d.getMonth() + 1) + "-" + win.pad2(d.getDate()) + " " + win.pad2(d.getHours()) + ":" + win.pad2(d.getMinutes()) + "]");
     }
 
-    // Ctrl+1..9: jump to the Nth "## " heading line, in document order.
-    // Headings are just a plain-text convention (not markdown rendering) —
-    // computed on demand at jump time since nothing else needs to track
-    // them live.
+    // Ctrl+1..9: jump to the Nth heading line, in document order. A heading
+    // is any line starting with one or more "#" followed by a space —
+    // standard markdown ATX heading syntax (# / ## / ### / ...), not
+    // markdown rendering, just a plain-text convention chosen to match how
+    // people already write headings rather than inventing a new marker.
+    // Requiring the space is what keeps this from colliding with a hex
+    // color, issue reference, or hashtag at the start of a line — none of
+    // those have a space right after the "#". Computed on demand at jump
+    // time since nothing else needs to track heading positions live.
     function headingPositions() {
         const lines = editor.text.split("\n");
         const positions = [];
         let offset = 0;
         for (const line of lines) {
-            if (line.startsWith("## ")) positions.push(offset);
+            if (/^#+ /.test(line)) positions.push(offset);
             offset += line.length + 1;
         }
         return positions;

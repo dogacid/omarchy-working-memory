@@ -104,7 +104,7 @@ Re-running it after a `git pull` picks up any update — it's idempotent.
 | `Ctrl+S`              | Save + commit immediately                 |
 | `Alt+D`               | Insert today's date as `[YYYY-MM-DD]`     |
 | `Alt+T`               | Insert date + time as `[YYYY-MM-DD HH:MM]` (24h) |
-| `Ctrl+1`..`Ctrl+9`     | Jump to the Nth `## ` heading in the note |
+| `Ctrl+1`..`Ctrl+9`     | Jump to the Nth heading in the note        |
 
 Otherwise it's a normal text field — click-drag or `Shift`+arrows to select,
 double/triple-click for word/line, everything you'd expect. Saving happens
@@ -112,15 +112,17 @@ automatically ~1s after you stop typing, with a git commit ~20s after that.
 
 ### Headings and jumping (`Ctrl+1`..`Ctrl+9`)
 
-A line starting with `## ` (two hashes, one space) is a heading — not
-markdown rendering, just a plain-text marker (chosen over a bare `#` to
-avoid colliding with things you'd naturally type, like issue refs or hex
-colors). `Ctrl+1` jumps to the first heading in the note, `Ctrl+2` the
-second, and so on through `Ctrl+9`; a number past the last heading is a
-no-op. Useful for splitting the note into a few running threads — work,
-a project, a hobby — and jumping straight to one. There's no separate
-management step: add a `## ` line to create one, delete or move it to
-remove or reorder it.
+A line starting with one or more `#` followed by a space (`# `, `## `,
+`### `, ...) is a heading — standard markdown ATX heading syntax, not
+markdown rendering, just a plain-text marker. The required space is what
+keeps this from colliding with things you'd naturally type at the start of
+a line, like a hex color (`#fff`) or an issue reference (`#123`) — neither
+has a space right after the `#`. `Ctrl+1` jumps to the first heading in the
+note, `Ctrl+2` the second, and so on through `Ctrl+9`; a number past the
+last heading is a no-op. Useful for splitting the note into a few running
+threads — work, a project, a hobby — and jumping straight to one. There's
+no separate management step: start a line with `#` (any number of them) and
+a space to create one, delete or move it to remove or reorder it.
 
 ### History (`Ctrl+R`)
 
@@ -238,7 +240,7 @@ key, typically), the same as any other repo.
 - Daily rotation / "show me the last few days" browsing.
 - Branching off a note for a side train of thought — a "rabbit hole" you can
   wander into and later merge back or abandon, using real git branches
-  (distinct from the `## ` headings above, which stay inside one branch).
+  (distinct from the `#` headings above, which stay inside one branch).
 - A read-only combined overview of all headings at a glance (a table of
   contents view) — floated alongside the `Ctrl+1`-`9` heading jump above,
   deferred in favor of the simpler jump-only version for now.
