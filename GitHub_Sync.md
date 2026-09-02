@@ -88,6 +88,14 @@ Host working-memory-sync
   IdentityAgent none
 ```
 
+Put this block at the **top** of `config_local`, above any `Host *` block
+already in it (a wildcard `IdentityAgent` pointing at 1Password's agent is a
+common thing to have there). ssh takes the first value it obtains for a
+keyword, so a `Host *` block placed *earlier* in the file would set
+`IdentityAgent` first and this block's `none` would never apply — the sync
+would then stall on interactive approval exactly as if none of this were
+configured.
+
 `IdentitiesOnly yes` tells ssh to use *only* the specified key file and never
 fall back to querying an agent for its own keys. `IdentityAgent none` is the
 belt-and-braces companion: this config has `Match host github.com` blocks that
