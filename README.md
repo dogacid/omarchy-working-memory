@@ -105,6 +105,8 @@ Re-running it after a `git pull` picks up any update — it's idempotent.
 | `Alt+D`               | Insert today's date as `[YYYY-MM-DD]`     |
 | `Alt+T`               | Insert date + time as `[YYYY-MM-DD HH:MM]` (24h) |
 | `Ctrl+1`..`Ctrl+9`     | Jump to the Nth heading in the note        |
+| `Ctrl+T`               | Switch topic (see below)                  |
+| `Ctrl+Shift+T`         | Create a new topic                        |
 | `Esc`                 | Enter vim Normal mode (see below); `?` once there for the full shortcut reference |
 
 Otherwise it's a normal text field — click-drag or `Shift`+arrows to select,
@@ -141,6 +143,37 @@ footer doesn't have to spell out every shortcut as more of them accumulate.
 A background sync reloading the note (or restoring from history) always
 drops back to Insert mode first, since a Visual selection can't mean
 anything once the underlying text has been replaced.
+
+### Topics (`Ctrl+T` / `Ctrl+Shift+T`)
+
+A topic is a separate note for a specific train of thought — a project,
+a concentrated piece of thinking, anything you want kept apart from the
+general scratchpad — that you can switch to and back from. Under the hood
+a topic is just a git branch: `main` is the default note, and each topic is
+`topic/<name>`, with its own independent commit history. There's no merge
+back into main — a topic is meant to carry its own thread, not to be
+reconciled into anything else; if you ever want its content elsewhere,
+copy it across by hand the same way you'd copy from any other note.
+
+- **`Ctrl+T`** opens a searchable list of every topic (main included,
+  always first) — type to filter, `↑`/`↓`/`j`/`k` to move, `Enter` to
+  switch, `Esc` to cancel.
+- **`Ctrl+Shift+T`** prompts for a name and creates a new topic. It starts
+  as a genuinely blank note — nothing from main or wherever you currently
+  are carries over — so it's a clean space for that new line of thinking.
+  The name becomes the branch's identity (lowercased, spaces and
+  punctuation collapsed to `-`), and a duplicate name is rejected rather
+  than silently switching you to the existing topic of that name.
+- Either action **flushes the topic you're leaving first** — the same
+  save + commit `Ctrl+S` does, synchronously, so nothing from it is ever at
+  risk — before switching or creating.
+- The window title shows which topic you're in (nothing for `main`, the
+  topic's name otherwise), since the footer stays too compact to spell it
+  out on every line.
+- Topics sync the same way `main` does: created on one machine, `Ctrl+T`
+  will see it on another once the regular background sync has had a chance
+  to fetch — no separate setup. Switching to a topic pulls its latest
+  content immediately, same as opening the app fresh does for `main`.
 
 ### Headings and jumping (`Ctrl+1`..`Ctrl+9`)
 

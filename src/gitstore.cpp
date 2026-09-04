@@ -6,6 +6,7 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QSaveFile>
+#include <QSet>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTextStream>
@@ -42,9 +43,20 @@ bool GitStore::open() {
             return false;
         }
         ensureIdentity();
+        // Brand new repo: normalize onto "main" immediately, same as
+        // always.
+        ensureBranch(QLatin1String(kBranch));
+    } else {
+        // An existing repo, though: only rename if it's still sitting on
+        // the pre-topics-feature default ("master") — never force an
+        // established "main" or, critically, an active "topic/*" branch
+        // back to main. Without this guard every launch would silently
+        // discard whichever topic the user was last on.
+        bool ok = false;
+        const QString branch = currentBranch(&ok);
+        if (ok && branch == QStringLiteral("master"))
+            ensureBranch(QLatin1String(kBranch));
     }
-
-    ensureBranch(QLatin1String(kBranch));
 
     if (!QFile::exists(m_path)) {
         QFile f(m_path);
@@ -215,6 +227,120 @@ bool GitStore::restoreAt(const QString &hash, const QDateTime &at) {
     return commitWithMessage(message, nullptr);
 }
 
+bool GitStore::localBranchExists(const QString &branch) const {
+    return git({QStringLiteral("rev-parse"), QStringLiteral("--verify"), QStringLiteral("-q"),
+                QStringLiteral("refs/heads/") + branch});
+}
+
+bool GitStore::remoteBranchExists(const QString &branch) const {
+    return git({QStringLiteral("rev-parse"), QStringLiteral("--verify"), QStringLiteral("-q"),
+                QStringLiteral("refs/remotes/origin/") + branch});
+}
+
+QString GitStore::slugify(const QString &name) {
+    const QString lower = name.trimmed().toLower();
+    QString out;
+    bool lastWasDash = true; // starts true so a leading run of junk doesn't produce a leading "-"
+    for (const QChar &c : lower) {
+        if (c.isLetterOrNumber()) {
+            out += c;
+            lastWasDash = false;
+        } else if (!lastWasDash) {
+            out += QLatin1Char('-');
+            lastWasDash = true;
+        }
+    }
+    while (out.endsWith(QLatin1Char('-')))
+        out.chop(1);
+    return out;
+}
+
+QStringList GitStore::topicBranches() const {
+    bool ok = false;
+    const QString out = gitOutput({
+        QStringLiteral("for-each-ref"), QStringLiteral("--format=%(refname)"),
+        QStringLiteral("refs/heads/main"), QStringLiteral("refs/heads/topic/*"),
+        QStringLiteral("refs/remotes/origin/main"), QStringLiteral("refs/remotes/origin/topic/*")
+    }, &ok);
+    if (!ok)
+        return {};
+
+    QSet<QString> names;
+    for (const QString &line : out.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+        if (line.startsWith(QStringLiteral("refs/heads/")))
+            names.insert(line.mid(11));
+        else if (line.startsWith(QStringLiteral("refs/remotes/origin/")))
+            names.insert(line.mid(20));
+    }
+
+    QStringList list(names.begin(), names.end());
+    list.sort();
+    if (list.removeOne(QStringLiteral("main")))
+        list.prepend(QStringLiteral("main")); // always first, if it exists at all
+    return list;
+}
+
+QString GitStore::currentTopic() const {
+    bool ok = false;
+    const QString branch = currentBranch(&ok);
+    if (!ok)
+        return QString();
+    if (branch.startsWith(QStringLiteral("topic/")))
+        return branch.mid(6);
+    return branch;
+}
+
+bool GitStore::checkoutBranch(const QString &branch) {
+    if (localBranchExists(branch)) {
+        if (!git({QStringLiteral("checkout"), QStringLiteral("-q"), branch})) {
+            setError(QStringLiteral("git checkout: ") + errorString());
+            return false;
+        }
+        return true;
+    }
+    if (remoteBranchExists(branch)) {
+        // Known only from a fetch so far (created on another machine) —
+        // create the local branch tracking it, rather than requiring the
+        // caller to know the difference.
+        if (!git({QStringLiteral("checkout"), QStringLiteral("-q"), QStringLiteral("-b"), branch,
+                   QStringLiteral("--track"), QStringLiteral("origin/") + branch})) {
+            setError(QStringLiteral("git checkout: ") + errorString());
+            return false;
+        }
+        return true;
+    }
+    setError(QStringLiteral("no such topic: ") + branch);
+    return false;
+}
+
+QString GitStore::createTopicBranch(const QString &name) {
+    const QString slug = slugify(name);
+    if (slug.isEmpty())
+        return QStringLiteral("enter a name for the topic");
+    const QString branch = QStringLiteral("topic/") + slug;
+
+    // "Create" should mean create — a name collision is reported back
+    // rather than silently switching to the existing topic of that name;
+    // Ctrl+T already covers "switch to an existing one".
+    if (localBranchExists(branch) || remoteBranchExists(branch))
+        return QStringLiteral("a topic named \"") + slug + QStringLiteral("\" already exists");
+
+    if (!git({QStringLiteral("checkout"), QStringLiteral("-q"), QStringLiteral("-b"), branch}))
+        return QStringLiteral("git checkout -b: ") + errorString();
+
+    // Blank slate: clear the note and commit that as the topic's own
+    // starting point, independent of whatever main (or wherever this was
+    // branched from) currently says. A no-op, harmlessly, if the source
+    // content was already empty — commitWithMessage() already treats "no
+    // diff" as success, not a failure.
+    if (!save(QString()))
+        return QStringLiteral("create topic file: ") + errorString();
+    if (!commitWithMessage(QStringLiteral("Start topic: ") + slug, nullptr))
+        return QStringLiteral("git commit: ") + errorString();
+
+    return QString();
+}
+
 bool GitStore::hasRemote() const {
     bool ok = false;
     const QString out = gitOutput({QStringLiteral("remote")}, &ok);
@@ -229,6 +355,17 @@ GitStore::SyncOutcome GitStore::syncWithRemote() {
     if (!hasRemote())
         return outcome; // ranSync stays false: no remote configured, nothing to do
     outcome.ranSync = true;
+
+    // Fetch every branch, not just the current one — this is the only
+    // place network I/O already happens on a schedule, so it's the natural
+    // place to keep remote-tracking refs for *other* topic branches fresh
+    // too (so one created on another machine shows up in topicBranches()
+    // here without ever having been checked out). Best-effort: a failure
+    // here isn't surfaced on its own — the branch-specific pull below will
+    // fail for the same underlying reason (offline, etc.) and that's what
+    // gets reported.
+    if (!syncCancelled())
+        git({QStringLiteral("fetch"), QStringLiteral("origin")}, /*network=*/true);
 
     bool conflict = false;
     if (!pullFromRemote(&conflict)) {

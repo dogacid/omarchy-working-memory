@@ -60,6 +60,31 @@ public:
 
     void logError(const QString &message) const;
 
+    // --- Topics: a "topic" is just a git branch, either `main` or
+    // `topic/<slug>`. They carry their own independent history — no merge
+    // back into main is offered, by design (see README). All four methods
+    // below are fast/local except createTopicBranch(), which pushes the new
+    // branch — still bounded by the same network timeout as everything
+    // else, and never fatal to the caller (Backend surfaces its error
+    // string, doesn't block on it).
+    //
+    // "main" plus every known `topic/*` branch — local branches and
+    // remote-tracking ones from the last fetch, deduplicated, main first.
+    // Remote-only entries let Ctrl+T show a topic created on another
+    // machine before this one has ever checked it out.
+    QStringList topicBranches() const;
+    // "main", or the slug (branch name with the "topic/" prefix stripped).
+    QString currentTopic() const;
+    // Checks out an existing branch — creating a local tracking branch
+    // first if it's currently known only via origin/<branch>.
+    bool checkoutBranch(const QString &branch);
+    // Slugifies name, creates+checks-out `topic/<slug>` off the current
+    // branch, then clears the note and commits that as the topic's blank
+    // starting point. Returns an empty string on success, else a message
+    // fit to show the user directly (empty name, duplicate topic, or a
+    // raw git error).
+    QString createTopicBranch(const QString &name);
+
     // A fast, local, no-network check — safe to call synchronously from the
     // UI thread (unlike syncWithRemote()) to decide whether a sync is worth
     // showing a "syncing…" status for at all.
@@ -107,9 +132,17 @@ private:
     // pushToRemote(); sets an explanatory error and returns true once
     // requestCancelSync() has been called.
     bool syncCancelled() const;
+    // True if refs/heads/<branch> exists locally.
+    bool localBranchExists(const QString &branch) const;
+    // True if refs/remotes/origin/<branch> exists from the last fetch.
+    bool remoteBranchExists(const QString &branch) const;
     void setError(const QString &error) const;
     static QString previewLine(const QString &content);
     static QString shortHash(const QString &hash);
+    // Lowercases, keeps letters/digits, collapses everything else to a
+    // single "-"; trims leading/trailing "-". Empty in, empty out — the
+    // caller (createTopicBranch) is what turns that into a real error.
+    static QString slugify(const QString &name);
 
     QString m_dir;
     QString m_path;

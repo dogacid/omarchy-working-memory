@@ -293,6 +293,61 @@ void Backend::restoreAt(const QString &hash, const QString &isoTime) {
     emit textReloaded(content);
 }
 
+QVariantList Backend::topicList() const {
+    const QString current = m_store.currentTopic();
+    QVariantList out;
+    for (const QString &branch : m_store.topicBranches()) {
+        const QString label = branch == QStringLiteral("main") ? branch : branch.mid(6); // strip "topic/"
+        QVariantMap m;
+        m[QStringLiteral("branch")] = branch;
+        m[QStringLiteral("label")] = label;
+        m[QStringLiteral("current")] = (label == current);
+        out.append(m);
+    }
+    return out;
+}
+
+QString Backend::switchTopic(const QString &branch) {
+    save();
+    if (m_unsaved || m_uncommitted)
+        return QStringLiteral("still saving — try again in a moment");
+    if (!m_store.checkoutBranch(branch))
+        return m_store.errorString();
+    applyTopicSwitch();
+    return QString();
+}
+
+QString Backend::createTopic(const QString &name) {
+    save();
+    if (m_unsaved || m_uncommitted)
+        return QStringLiteral("still saving — try again in a moment");
+    const QString err = m_store.createTopicBranch(name);
+    if (!err.isEmpty())
+        return err;
+    applyTopicSwitch();
+    return QString();
+}
+
+void Backend::applyTopicSwitch() {
+    bool ok = false;
+    const QString content = m_store.load(&ok);
+    if (!ok) {
+        fail(QStringLiteral("load"), m_store.errorString());
+        return;
+    }
+    m_pendingText = content;
+    m_unsaved = false;
+    m_uncommitted = false;
+    m_saveTimer.stop();
+    m_commitTimer.stop();
+    setStatus(QStringLiteral("synced"));
+    emit currentTopicChanged();
+    emit textReloaded(content);
+    // Pull-then-push for the topic just switched into, same as opening the
+    // app fresh — it may have changes waiting from another machine.
+    triggerSync();
+}
+
 void Backend::copyToClipboard(const QString &text) const {
     if (auto *clipboard = QGuiApplication::clipboard())
         clipboard->setText(text);

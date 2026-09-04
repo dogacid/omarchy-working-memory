@@ -10,7 +10,7 @@ ApplicationWindow {
     minimumWidth: 420
     minimumHeight: 300
     visible: true
-    title: "Working memory"
+    title: backend.currentTopic === "main" ? "Working memory" : "Working memory — " + backend.currentTopic
     color: backend.themeBackground
 
     // The error overlay is independent of this and just layers on top
@@ -38,6 +38,16 @@ ApplicationWindow {
     // next key completes "dd" — reset on any other key or mode change.
     property bool pendingD: false
     property bool showHelp: false
+
+    // --- Topics (Ctrl+T switch, Ctrl+Shift+T create) — see backend's
+    // topicList()/switchTopic()/createTopic(), themselves thin wrappers
+    // around GitStore's branch-based topics.
+    property bool showTopicSwitcher: false
+    property var topics: []
+    property var filteredTopics: []
+    property string topicSwitchError: ""
+    property bool showTopicCreator: false
+    property string topicCreateError: ""
 
     onClosing: backend.save()
 
@@ -239,6 +249,56 @@ ApplicationWindow {
         }
     }
 
+    // --- Topics -------------------------------------------------------
+    // Ctrl+T opens a searchable switcher (mirrors the history search/list
+    // pattern below); Ctrl+Shift+T opens a one-field creation prompt. Both
+    // flush the current topic (save+commit, synchronously) before acting —
+    // see Backend::switchTopic()/createTopic() — so switching or creating
+    // never risks losing an in-progress edit.
+    function openTopicSwitcher() {
+        win.topics = backend.topicList();
+        win.filteredTopics = win.topics;
+        win.topicSwitchError = "";
+        topicSearch.text = "";
+        win.showTopicSwitcher = true;
+        topicResults.currentIndex = win.filteredTopics.length > 0 ? 0 : -1;
+        topicSearch.forceActiveFocus();
+    }
+    function filterTopics(query) {
+        win.filteredTopics = query
+            ? win.topics.filter(function (t) { return t.label.toLowerCase().indexOf(query.toLowerCase()) !== -1; })
+            : win.topics;
+        topicResults.currentIndex = win.filteredTopics.length > 0 ? 0 : -1;
+    }
+    function confirmTopicSwitch() {
+        if (topicResults.currentIndex < 0 || topicResults.currentIndex >= win.filteredTopics.length) return;
+        const err = backend.switchTopic(win.filteredTopics[topicResults.currentIndex].branch);
+        if (err) { win.topicSwitchError = err; return; }
+        win.showTopicSwitcher = false;
+        editor.forceActiveFocus();
+    }
+    function closeTopicSwitcher() {
+        win.showTopicSwitcher = false;
+        editor.forceActiveFocus();
+    }
+
+    function openTopicCreator() {
+        win.topicCreateError = "";
+        topicNameField.text = "";
+        win.showTopicCreator = true;
+        topicNameField.forceActiveFocus();
+    }
+    function confirmTopicCreate() {
+        const err = backend.createTopic(topicNameField.text);
+        if (err) { win.topicCreateError = err; return; }
+        win.showTopicCreator = false;
+        editor.forceActiveFocus();
+    }
+    function closeTopicCreator() {
+        win.showTopicCreator = false;
+        editor.forceActiveFocus();
+    }
+
     // Global shortcuts. Ctrl+E (drop to a real editor for selection) is
     // gone entirely now that the editor is a native QQuickTextArea with
     // real shift-arrow/word/mouse selection built in.
@@ -255,6 +315,16 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+7"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(7) }
     Shortcut { sequence: "Ctrl+8"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(8) }
     Shortcut { sequence: "Ctrl+9"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(9) }
+    Shortcut {
+        sequence: "Ctrl+T"
+        enabled: win.mode === "edit" && !win.showHelp && !win.showTopicCreator && backend.lastError === ""
+        onActivated: win.openTopicSwitcher()
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+T"
+        enabled: win.mode === "edit" && !win.showHelp && !win.showTopicSwitcher && backend.lastError === ""
+        onActivated: win.openTopicCreator()
+    }
     // Disabled while visual-selecting: Esc there means "cancel the
     // selection" (handled in previewArea's own Keys.onPressed below), not
     // "leave history" — a second Esc after that falls through to this one.
@@ -324,6 +394,13 @@ ApplicationWindow {
                 // must never fall through and get typed as literal text.
                 Keys.onPressed: function (event) {
                     if (win.editorMode === "insert") return;
+                    // Every vim command here is a plain, unmodified key —
+                    // so anything held with Ctrl/Alt/Meta is never one of
+                    // them and must fall through to the window's global
+                    // Shortcut items (Ctrl+S, Ctrl+R, Ctrl+T, Alt+D, ...),
+                    // which would otherwise stop working the moment Esc
+                    // leaves Insert mode.
+                    if (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) return;
                     event.accepted = true;
 
                     if (win.showHelp) {
@@ -692,6 +769,8 @@ ApplicationWindow {
                                 { key: "Alt+D", desc: "Insert today's date" },
                                 { key: "Alt+T", desc: "Insert date + time" },
                                 { key: "Ctrl+1..9", desc: "Jump to the Nth heading" },
+                                { key: "Ctrl+T", desc: "Switch topic" },
+                                { key: "Ctrl+Shift+T", desc: "Create a new topic" },
                                 { key: "Esc", desc: "Enter vim Normal mode" }
                             ]},
                             { title: "Normal mode", items: [
@@ -754,5 +833,159 @@ ApplicationWindow {
                 }
             }
         }
+    }
+
+    // --- Topic switcher (Ctrl+T) -------------------------------------------
+    // Same search-as-you-type + list pattern as the history picker
+    // (historySearch/historyList above), just against topics instead of
+    // versions — a filter box up top since the list can grow without bound.
+    Rectangle {
+        anchors.fill: parent
+        visible: win.showTopicSwitcher
+        color: Qt.rgba(0, 0, 0, 0.5)
+        z: 9
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(420, parent.width - 80)
+            height: Math.min(380, parent.height - 80)
+            color: backend.themeBackground
+            border.color: backend.themeMuted
+            border.width: 1
+            radius: 6
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 16
+                spacing: 8
+
+                Text { text: "Switch topic"; font.bold: true; font.pixelSize: 16; color: backend.themeForeground }
+
+                TextField {
+                    id: topicSearch
+                    Layout.fillWidth: true
+                    placeholderText: "Search topics…"
+                    color: backend.themeForeground
+                    placeholderTextColor: backend.themeMuted
+                    background: Rectangle { color: backend.themeSelection }
+                    onTextChanged: win.filterTopics(text)
+                    Keys.onDownPressed: topicResults.forceActiveFocus()
+                    Keys.onReturnPressed: win.confirmTopicSwitch()
+                    Keys.onEnterPressed: win.confirmTopicSwitch()
+                }
+
+                ListView {
+                    id: topicResults
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    model: win.filteredTopics
+                    clip: true
+                    keyNavigationEnabled: true
+                    highlightMoveDuration: 60
+
+                    Keys.onReturnPressed: win.confirmTopicSwitch()
+                    Keys.onEnterPressed: win.confirmTopicSwitch()
+                    Keys.onEscapePressed: win.closeTopicSwitcher()
+
+                    delegate: ItemDelegate {
+                        width: topicResults.width
+                        highlighted: ListView.isCurrentItem
+                        onClicked: { topicResults.currentIndex = index; win.confirmTopicSwitch(); }
+                        background: Rectangle { color: highlighted ? backend.themeSelection : "transparent" }
+                        contentItem: Row {
+                            spacing: 8
+                            Text {
+                                text: modelData.current ? "●" : ""
+                                color: backend.themeAccent
+                                width: 14
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            Text {
+                                text: modelData.label
+                                color: backend.themeForeground
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    visible: win.topicSwitchError !== ""
+                    text: win.topicSwitchError
+                    color: "#f7768e"
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                Text {
+                    text: "enter select · esc cancel"
+                    color: backend.themeMuted
+                    font.pixelSize: 11
+                }
+            }
+        }
+
+        Shortcut { sequence: "Escape"; enabled: win.showTopicSwitcher; onActivated: win.closeTopicSwitcher() }
+    }
+
+    // --- Topic creator (Ctrl+Shift+T) ---------------------------------------
+    Rectangle {
+        anchors.fill: parent
+        visible: win.showTopicCreator
+        color: Qt.rgba(0, 0, 0, 0.5)
+        z: 9
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(420, parent.width - 80)
+            height: topicCreateColumn.implicitHeight + 32
+            color: backend.themeBackground
+            border.color: backend.themeMuted
+            border.width: 1
+            radius: 6
+
+            ColumnLayout {
+                id: topicCreateColumn
+                anchors.fill: parent
+                anchors.margins: 16
+                spacing: 10
+
+                Text { text: "New topic"; font.bold: true; font.pixelSize: 16; color: backend.themeForeground }
+                Text {
+                    text: "Starts as its own blank note, branched off — switch back any time with Ctrl+T."
+                    color: backend.themeMuted
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                TextField {
+                    id: topicNameField
+                    Layout.fillWidth: true
+                    placeholderText: "Topic name…"
+                    color: backend.themeForeground
+                    placeholderTextColor: backend.themeMuted
+                    background: Rectangle { color: backend.themeSelection }
+                    Keys.onReturnPressed: win.confirmTopicCreate()
+                    Keys.onEnterPressed: win.confirmTopicCreate()
+                }
+
+                Text {
+                    visible: win.topicCreateError !== ""
+                    text: win.topicCreateError
+                    color: "#f7768e"
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                Text {
+                    text: "enter create · esc cancel"
+                    color: backend.themeMuted
+                    font.pixelSize: 11
+                }
+            }
+        }
+
+        Shortcut { sequence: "Escape"; enabled: win.showTopicCreator; onActivated: win.closeTopicCreator() }
     }
 }

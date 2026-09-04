@@ -23,6 +23,7 @@ class Backend : public QObject {
     Q_PROPERTY(QString themeAccent READ themeAccent NOTIFY themeChanged)
     Q_PROPERTY(QString themeSelection READ themeSelection NOTIFY themeChanged)
     Q_PROPERTY(QString themeMuted READ themeMuted NOTIFY themeChanged)
+    Q_PROPERTY(QString currentTopic READ currentTopic NOTIFY currentTopicChanged)
 
 public:
     explicit Backend(QObject *parent = nullptr);
@@ -47,6 +48,7 @@ public:
     QString themeAccent() const { return m_themeAccent; }
     QString themeSelection() const { return m_themeSelection; }
     QString themeMuted() const { return m_themeMuted; }
+    QString currentTopic() const { return m_store.currentTopic(); }
 
     Q_INVOKABLE QString initialText() const;
     Q_INVOKABLE void noteEdited(const QString &text);
@@ -58,13 +60,28 @@ public:
     Q_INVOKABLE void restoreAt(const QString &hash, const QString &isoTime);
     Q_INVOKABLE void copyToClipboard(const QString &text) const;
 
+    // --- Topics (see gitstore.h) -------------------------------------
+    // {branch, label, current} per entry, "main" first — for the Ctrl+T
+    // switcher list.
+    Q_INVOKABLE QVariantList topicList() const;
+    // Flushes the current topic (save + commit, synchronously — same as
+    // Ctrl+S) before switching, so nothing from it is ever lost. Returns
+    // an empty string on success, else a message fit to show inline in
+    // the switcher (e.g. "still saving — try again in a moment").
+    Q_INVOKABLE QString switchTopic(const QString &branch);
+    // Same flush-first behavior; empty string on success, else a message
+    // fit to show inline in the creation prompt.
+    Q_INVOKABLE QString createTopic(const QString &name);
+
 signals:
     void statusChanged();
     void lastErrorChanged();
     void themeChanged();
+    void currentTopicChanged();
     // Emitted after a restore so the live editor picks up the new text —
     // the editor's text is otherwise never pushed to it from C++, only read
-    // from it via noteEdited(), to avoid a binding feedback loop.
+    // from it via noteEdited(), to avoid a binding feedback loop. Also used
+    // after switching/creating a topic, for the same reason.
     void textReloaded(const QString &text);
 
 private slots:
@@ -98,6 +115,10 @@ private:
     // around it, so nothing can stay stuck longer than one interval.
     void periodicCheck();
     void reloadIfChanged();
+    // Shared tail of switchTopic()/createTopic(): loads the freshly
+    // checked-out branch's content into the live editor and resets local
+    // state to match a just-opened note, then kicks off a sync for it.
+    void applyTopicSwitch();
 
     GitStore m_store;
     QString m_pendingText;
