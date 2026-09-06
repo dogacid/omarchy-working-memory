@@ -311,6 +311,7 @@ QString Backend::switchTopic(const QString &branch) {
     save();
     if (m_unsaved || m_uncommitted)
         return QStringLiteral("still saving — try again in a moment");
+    waitForSyncToStop();
     if (!m_store.checkoutBranch(branch))
         return m_store.errorString();
     applyTopicSwitch();
@@ -321,11 +322,19 @@ QString Backend::createTopic(const QString &name) {
     save();
     if (m_unsaved || m_uncommitted)
         return QStringLiteral("still saving — try again in a moment");
+    waitForSyncToStop();
     const QString err = m_store.createTopicBranch(name);
     if (!err.isEmpty())
         return err;
     applyTopicSwitch();
     return QString();
+}
+
+void Backend::waitForSyncToStop() {
+    if (!m_syncWatcher.isRunning())
+        return;
+    m_store.requestCancelSync();
+    m_syncWatcher.waitForFinished();
 }
 
 void Backend::applyTopicSwitch() {

@@ -119,6 +119,14 @@ private:
     // checked-out branch's content into the live editor and resets local
     // state to match a just-opened note, then kicks off a sync for it.
     void applyTopicSwitch();
+    // switchTopic()/createTopic() must never run `git checkout`/`checkout
+    // -b` while a background sync (triggerSync()) is concurrently running
+    // `pull`/`push` against the very same working tree — that race can
+    // leave the repo with a dirty tree checkoutBranch() can't get past, or
+    // worse, merge a pull started against the old branch into the newly
+    // checked-out one. Cancels and waits for any in-flight sync first,
+    // bounded the same way the destructor's wait is (~5s worst case).
+    void waitForSyncToStop();
 
     GitStore m_store;
     QString m_pendingText;

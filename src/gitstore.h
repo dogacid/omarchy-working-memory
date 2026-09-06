@@ -104,12 +104,14 @@ public:
     // Best-effort, not a hard abort: sets a flag checked between individual
     // git invocations (before ls-remote/pull/push each start), so a sync
     // already blocked inside one such call still runs to that call's own
-    // timeout — but won't go on to start the next one. Exists so Backend's
-    // destructor (which must wait for an in-flight sync — see its comment)
-    // isn't stuck for the full multi-call sequence (up to ~15s) against a
-    // slow/unreachable remote, just whichever single call is already
-    // running (up to ~5s). Call from any thread; intended for shutdown
-    // only, so there's no way to un-cancel.
+    // timeout — but won't go on to start the next one. Exists so Backend can
+    // bound how long it waits for an in-flight sync before touching the repo
+    // itself (destructor teardown, or a topic switch's checkout — see
+    // Backend::switchTopic()) to at most whichever single call is already
+    // running (up to ~5s), rather than the full multi-call sequence (up to
+    // ~15s). Call from any thread. The flag is self-clearing: every fresh
+    // syncWithRemote() call resets it at entry, so cancelling one sync never
+    // disables the next.
     void requestCancelSync();
 
 private:

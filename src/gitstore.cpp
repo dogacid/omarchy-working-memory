@@ -351,6 +351,10 @@ bool GitStore::hasRemote() const {
 }
 
 GitStore::SyncOutcome GitStore::syncWithRemote() {
+    // Clear any earlier cancellation before this run starts: a previous
+    // caller (e.g. a topic switch) may have cancelled-and-waited for a prior
+    // sync without ever wanting to disable every sync after it.
+    m_cancelSync.store(false, std::memory_order_relaxed);
     SyncOutcome outcome;
     if (!hasRemote())
         return outcome; // ranSync stays false: no remote configured, nothing to do
