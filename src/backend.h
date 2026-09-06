@@ -65,13 +65,15 @@ public:
     // switcher list.
     Q_INVOKABLE QVariantList topicList() const;
     // Flushes the current topic (save + commit, synchronously — same as
-    // Ctrl+S) before switching, so nothing from it is ever lost. Returns
-    // an empty string on success, else a message fit to show inline in
-    // the switcher (e.g. "still saving — try again in a moment").
-    Q_INVOKABLE QString switchTopic(const QString &branch);
-    // Same flush-first behavior; empty string on success, else a message
-    // fit to show inline in the creation prompt.
-    Q_INVOKABLE QString createTopic(const QString &name);
+    // Ctrl+S) then dispatches the actual branch switch onto a background
+    // thread — see the .cpp for why the checkout itself can't run on the
+    // UI thread. Result (empty string on success, else a message fit to
+    // show inline in the switcher) arrives via topicOpFinished(). A no-op
+    // if an operation is already in flight.
+    Q_INVOKABLE void requestTopicSwitch(const QString &branch);
+    // Same flush-first, then-background behavior; result fit to show
+    // inline in the creation prompt.
+    Q_INVOKABLE void requestTopicCreate(const QString &name);
 
 signals:
     void statusChanged();
@@ -83,11 +85,15 @@ signals:
     // from it via noteEdited(), to avoid a binding feedback loop. Also used
     // after switching/creating a topic, for the same reason.
     void textReloaded(const QString &text);
+    // Emitted once requestTopicSwitch()/requestTopicCreate() finishes:
+    // empty string on success, else a message to show inline.
+    void topicOpFinished(const QString &error);
 
 private slots:
     void onSaveTimeout();
     void onCommitTimeout();
     void onSyncFinished();
+    void onTopicOpFinished();
 
 private:
     void setStatus(const QString &status);
@@ -115,17 +121,20 @@ private:
     // around it, so nothing can stay stuck longer than one interval.
     void periodicCheck();
     void reloadIfChanged();
-    // Shared tail of switchTopic()/createTopic(): loads the freshly
-    // checked-out branch's content into the live editor and resets local
-    // state to match a just-opened note, then kicks off a sync for it.
+    // Shared tail of requestTopicSwitch()/requestTopicCreate(), run on the
+    // UI thread once the background checkout has finished: loads the
+    // freshly checked-out branch's content into the live editor and resets
+    // local state to match a just-opened note, then kicks off a sync for it.
     void applyTopicSwitch();
-    // switchTopic()/createTopic() must never run `git checkout`/`checkout
-    // -b` while a background sync (triggerSync()) is concurrently running
-    // `pull`/`push` against the very same working tree — that race can
-    // leave the repo with a dirty tree checkoutBranch() can't get past, or
-    // worse, merge a pull started against the old branch into the newly
-    // checked-out one. Cancels and waits for any in-flight sync first,
-    // bounded the same way the destructor's wait is (~5s worst case).
+    // The branch switch/create itself must never run `git checkout`/
+    // `checkout -b` while a background sync (triggerSync()) is concurrently
+    // running `pull`/`push` against the very same working tree — that race
+    // can leave the repo with a dirty tree checkoutBranch() can't get past,
+    // or worse, merge a pull started against the old branch into the newly
+    // checked-out one. This waits out any in-flight sync first (cancelling
+    // it to bound the wait, same as the destructor does) — called from the
+    // QtConcurrent worker thread in requestTopicSwitch()/requestTopicCreate(),
+    // never the UI thread, precisely so this wait can never freeze the UI.
     void waitForSyncToStop();
 
     GitStore m_store;
@@ -138,6 +147,7 @@ private:
     QTimer m_commitTimer;
     QTimer m_periodicSyncTimer;
     QFutureWatcher<GitStore::SyncOutcome> m_syncWatcher;
+    QFutureWatcher<QString> m_topicWatcher;
 
     bool m_darkMode = true;
     QString m_themeBackground;

@@ -48,6 +48,11 @@ ApplicationWindow {
     property string topicSwitchError: ""
     property bool showTopicCreator: false
     property string topicCreateError: ""
+    // True while requestTopicSwitch()/requestTopicCreate() is running on its
+    // background thread — see backend.h for why that wait can be long
+    // enough to matter. Disables the overlay's input and a second attempt
+    // until topicOpFinished arrives.
+    property bool topicBusy: false
 
     onClosing: backend.save()
 
@@ -271,13 +276,14 @@ ApplicationWindow {
         topicResults.currentIndex = win.filteredTopics.length > 0 ? 0 : -1;
     }
     function confirmTopicSwitch() {
+        if (win.topicBusy) return;
         if (topicResults.currentIndex < 0 || topicResults.currentIndex >= win.filteredTopics.length) return;
-        const err = backend.switchTopic(win.filteredTopics[topicResults.currentIndex].branch);
-        if (err) { win.topicSwitchError = err; return; }
-        win.showTopicSwitcher = false;
-        editor.forceActiveFocus();
+        win.topicSwitchError = "";
+        win.topicBusy = true;
+        backend.requestTopicSwitch(win.filteredTopics[topicResults.currentIndex].branch);
     }
     function closeTopicSwitcher() {
+        if (win.topicBusy) return; // let the in-flight switch land first
         win.showTopicSwitcher = false;
         editor.forceActiveFocus();
     }
@@ -289,12 +295,13 @@ ApplicationWindow {
         topicNameField.forceActiveFocus();
     }
     function confirmTopicCreate() {
-        const err = backend.createTopic(topicNameField.text);
-        if (err) { win.topicCreateError = err; return; }
-        win.showTopicCreator = false;
-        editor.forceActiveFocus();
+        if (win.topicBusy) return;
+        win.topicCreateError = "";
+        win.topicBusy = true;
+        backend.requestTopicCreate(topicNameField.text);
     }
     function closeTopicCreator() {
+        if (win.topicBusy) return;
         win.showTopicCreator = false;
         editor.forceActiveFocus();
     }
@@ -302,7 +309,7 @@ ApplicationWindow {
     // Global shortcuts. Ctrl+E (drop to a real editor for selection) is
     // gone entirely now that the editor is a native QQuickTextArea with
     // real shift-arrow/word/mouse selection built in.
-    Shortcut { sequence: "Ctrl+S"; enabled: win.mode === "edit"; onActivated: backend.save() }
+    Shortcut { sequence: "Ctrl+S"; enabled: win.mode === "edit" && !win.topicBusy; onActivated: backend.save() }
     Shortcut { sequence: "Ctrl+R"; onActivated: win.mode === "edit" ? win.openHistory() : win.backToEdit() }
     Shortcut { sequence: "Alt+D"; enabled: win.mode === "edit"; onActivated: win.insertDate() }
     Shortcut { sequence: "Alt+T"; enabled: win.mode === "edit"; onActivated: win.insertDateTime() }
@@ -317,12 +324,12 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+9"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(9) }
     Shortcut {
         sequence: "Ctrl+T"
-        enabled: win.mode === "edit" && !win.showHelp && !win.showTopicCreator && backend.lastError === ""
+        enabled: win.mode === "edit" && !win.showHelp && !win.showTopicCreator && !win.topicBusy && backend.lastError === ""
         onActivated: win.openTopicSwitcher()
     }
     Shortcut {
         sequence: "Ctrl+Shift+T"
-        enabled: win.mode === "edit" && !win.showHelp && !win.showTopicSwitcher && backend.lastError === ""
+        enabled: win.mode === "edit" && !win.showHelp && !win.showTopicSwitcher && !win.topicBusy && backend.lastError === ""
         onActivated: win.openTopicCreator()
     }
     // Disabled while visual-selecting: Esc there means "cancel the
@@ -334,6 +341,21 @@ ApplicationWindow {
     // (cancel visual / already-normal no-op) — this Shortcut is disabled at
     // that point so the two never race for the same keypress.
     Shortcut { sequence: "Escape"; enabled: win.mode === "edit" && win.editorMode === "insert"; onActivated: win.enterEditorNormalMode() }
+
+    Connections {
+        target: backend
+        function onTopicOpFinished(error) {
+            win.topicBusy = false;
+            if (error) {
+                if (win.showTopicSwitcher) win.topicSwitchError = error;
+                else if (win.showTopicCreator) win.topicCreateError = error;
+                return;
+            }
+            win.showTopicSwitcher = false;
+            win.showTopicCreator = false;
+            editor.forceActiveFocus();
+        }
+    }
 
     Connections {
         target: backend
@@ -864,6 +886,7 @@ ApplicationWindow {
                 TextField {
                     id: topicSearch
                     Layout.fillWidth: true
+                    enabled: !win.topicBusy
                     placeholderText: "Search topics…"
                     color: backend.themeForeground
                     placeholderTextColor: backend.themeMuted
@@ -878,6 +901,7 @@ ApplicationWindow {
                     id: topicResults
                     Layout.fillWidth: true
                     Layout.fillHeight: true
+                    enabled: !win.topicBusy
                     model: win.filteredTopics
                     clip: true
                     keyNavigationEnabled: true
@@ -910,7 +934,14 @@ ApplicationWindow {
                 }
 
                 Text {
-                    visible: win.topicSwitchError !== ""
+                    visible: win.topicBusy
+                    text: "switching…"
+                    color: backend.themeMuted
+                    font.pixelSize: 12
+                }
+
+                Text {
+                    visible: !win.topicBusy && win.topicSwitchError !== ""
                     text: win.topicSwitchError
                     color: "#f7768e"
                     wrapMode: Text.Wrap
@@ -925,7 +956,7 @@ ApplicationWindow {
             }
         }
 
-        Shortcut { sequence: "Escape"; enabled: win.showTopicSwitcher; onActivated: win.closeTopicSwitcher() }
+        Shortcut { sequence: "Escape"; enabled: win.showTopicSwitcher && !win.topicBusy; onActivated: win.closeTopicSwitcher() }
     }
 
     // --- Topic creator (Ctrl+Shift+T) ---------------------------------------
@@ -962,6 +993,7 @@ ApplicationWindow {
                 TextField {
                     id: topicNameField
                     Layout.fillWidth: true
+                    enabled: !win.topicBusy
                     placeholderText: "Topic name…"
                     color: backend.themeForeground
                     placeholderTextColor: backend.themeMuted
@@ -971,7 +1003,14 @@ ApplicationWindow {
                 }
 
                 Text {
-                    visible: win.topicCreateError !== ""
+                    visible: win.topicBusy
+                    text: "creating…"
+                    color: backend.themeMuted
+                    font.pixelSize: 12
+                }
+
+                Text {
+                    visible: !win.topicBusy && win.topicCreateError !== ""
                     text: win.topicCreateError
                     color: "#f7768e"
                     wrapMode: Text.Wrap
@@ -986,6 +1025,6 @@ ApplicationWindow {
             }
         }
 
-        Shortcut { sequence: "Escape"; enabled: win.showTopicCreator; onActivated: win.closeTopicCreator() }
+        Shortcut { sequence: "Escape"; enabled: win.showTopicCreator && !win.topicBusy; onActivated: win.closeTopicCreator() }
     }
 }

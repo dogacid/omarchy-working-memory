@@ -28,6 +28,7 @@ Backend::Backend(QObject *parent) : QObject(parent) {
     connect(&m_commitTimer, &QTimer::timeout, this, &Backend::onCommitTimeout);
     connect(&m_periodicSyncTimer, &QTimer::timeout, this, &Backend::periodicCheck);
     connect(&m_syncWatcher, &QFutureWatcher<GitStore::SyncOutcome>::finished, this, &Backend::onSyncFinished);
+    connect(&m_topicWatcher, &QFutureWatcher<QString>::finished, this, &Backend::onTopicOpFinished);
     connect(&m_themeWatcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &) {
         loadOmarchyTheme();
         watchOmarchyTheme();
@@ -53,6 +54,15 @@ Backend::~Backend() {
     // an unreachable remote): it stops the sync from *starting* its next
     // network call, so the wait below is bounded by whichever single call
     // is already running (up to ~5s), not the whole sequence.
+    //
+    // A topic switch/create (see requestTopicSwitch()/requestTopicCreate())
+    // runs on its own worker thread too, and it does its own waiting on
+    // m_syncWatcher internally — so waiting for it first, then for
+    // m_syncWatcher, covers both without double-cancelling anything.
+    if (m_topicWatcher.isRunning()) {
+        m_store.requestCancelSync();
+        m_topicWatcher.waitForFinished();
+    }
     if (m_syncWatcher.isRunning()) {
         m_store.requestCancelSync();
         m_syncWatcher.waitForFinished();
@@ -307,27 +317,47 @@ QVariantList Backend::topicList() const {
     return out;
 }
 
-QString Backend::switchTopic(const QString &branch) {
+void Backend::requestTopicSwitch(const QString &branch) {
+    if (m_topicWatcher.isRunning())
+        return; // one at a time — the switcher/creator UI disables itself meanwhile
     save();
-    if (m_unsaved || m_uncommitted)
-        return QStringLiteral("still saving — try again in a moment");
-    waitForSyncToStop();
-    if (!m_store.checkoutBranch(branch))
-        return m_store.errorString();
-    applyTopicSwitch();
-    return QString();
+    if (m_unsaved || m_uncommitted) {
+        emit topicOpFinished(QStringLiteral("still saving — try again in a moment"));
+        return;
+    }
+    setStatus(QStringLiteral("switching…"));
+    m_topicWatcher.setFuture(QtConcurrent::run([this, branch] {
+        waitForSyncToStop();
+        if (!m_store.checkoutBranch(branch))
+            return m_store.errorString();
+        return QString();
+    }));
 }
 
-QString Backend::createTopic(const QString &name) {
+void Backend::requestTopicCreate(const QString &name) {
+    if (m_topicWatcher.isRunning())
+        return;
     save();
-    if (m_unsaved || m_uncommitted)
-        return QStringLiteral("still saving — try again in a moment");
-    waitForSyncToStop();
-    const QString err = m_store.createTopicBranch(name);
-    if (!err.isEmpty())
-        return err;
+    if (m_unsaved || m_uncommitted) {
+        emit topicOpFinished(QStringLiteral("still saving — try again in a moment"));
+        return;
+    }
+    setStatus(QStringLiteral("switching…"));
+    m_topicWatcher.setFuture(QtConcurrent::run([this, name] {
+        waitForSyncToStop();
+        return m_store.createTopicBranch(name);
+    }));
+}
+
+void Backend::onTopicOpFinished() {
+    const QString err = m_topicWatcher.result();
+    if (!err.isEmpty()) {
+        setStatus(QStringLiteral("synced"));
+        emit topicOpFinished(err);
+        return;
+    }
     applyTopicSwitch();
-    return QString();
+    emit topicOpFinished(QString());
 }
 
 void Backend::waitForSyncToStop() {
