@@ -27,6 +27,10 @@ ApplicationWindow {
     // anchor/cursor model vim's visual mode uses.
     property string previewSelMode: "none"
     property int previewAnchor: 0
+    // First "g" of a "gg" in the preview — the editor's own pendingG (see
+    // below) is kept separate so a half-typed gg in one never completes in
+    // the other.
+    property bool previewPendingG: false
 
     // Same idea, but live-editable: "insert" (normal typing, the default)
     // | "normal" (vim Normal mode, entered via Esc) | "visual" (v) |
@@ -37,6 +41,10 @@ ApplicationWindow {
     // True right after a single "d" in Normal mode, waiting to see if the
     // next key completes "dd" — reset on any other key or mode change.
     property bool pendingD: false
+    // Same, for the first "g" of a "gg" (jump to top). Separate from
+    // pendingD because gg is a motion and works in Visual mode too, where
+    // dd never applies.
+    property bool pendingG: false
     property bool showHelp: false
 
     // --- Topics (Ctrl+T switch, Ctrl+Shift+T create) — see backend's
@@ -144,6 +152,7 @@ ApplicationWindow {
         if (!win.selectedEntry) return;
         win.previewSelMode = kind;
         win.previewAnchor = 0;
+        win.previewPendingG = false;
         previewArea.cursorPosition = 0;
         previewArea.forceActiveFocus();
         win.updatePreviewSelection();
@@ -165,6 +174,7 @@ ApplicationWindow {
 
     function exitVisualMode() {
         win.previewSelMode = "none";
+        win.previewPendingG = false;
         previewArea.deselect();
         historyList.forceActiveFocus();
     }
@@ -183,16 +193,19 @@ ApplicationWindow {
     function enterEditorNormalMode() {
         win.editorMode = "normal";
         win.pendingD = false;
+        win.pendingG = false;
     }
     function enterEditorInsertMode() {
         win.editorMode = "insert";
         win.pendingD = false;
+        win.pendingG = false;
         editor.deselect();
     }
     function enterEditorVisual(kind) {
         win.editorMode = kind;
         win.editorAnchor = editor.cursorPosition;
         win.pendingD = false;
+        win.pendingG = false;
         win.updateEditorSelection();
     }
     function updateEditorSelection() {
@@ -430,9 +443,35 @@ ApplicationWindow {
                         return;
                     }
 
+                    // A pending prefix ("d" of dd, "g" of gg) lives only
+                    // until the very next key, vim-style — read it and
+                    // clear it up front so no branch below can leave one
+                    // stale and have it complete a sequence several keys later.
+                    const hadD = win.pendingD, hadG = win.pendingG;
+                    win.pendingD = false;
+                    win.pendingG = false;
+
                     if (event.key === Qt.Key_Escape) {
                         editor.deselect();
                         win.enterEditorNormalMode();
+                        return;
+                    }
+
+                    // gg / G — jump to the very top / very bottom of the
+                    // note, the motion that matters most once a note has
+                    // grown past a few screens. Handled before the mode
+                    // split because it behaves identically in Normal and
+                    // Visual mode: updateEditorSelection() does nothing in
+                    // Normal and extends the selection to the new cursor
+                    // position in Visual.
+                    if (event.text === "g") {
+                        if (hadG) { editor.cursorPosition = 0; win.updateEditorSelection(); }
+                        else win.pendingG = true;
+                        return;
+                    }
+                    if (event.text === "G") {
+                        editor.cursorPosition = editor.text.length;
+                        win.updateEditorSelection();
                         return;
                     }
 
@@ -449,13 +488,13 @@ ApplicationWindow {
                     }
 
                     // Normal mode.
-                    if (event.text === "?") { win.showHelp = true; win.pendingD = false; return; }
+                    if (event.text === "?") { win.showHelp = true; return; }
                     if (event.text === "i") { win.enterEditorInsertMode(); return; }
                     if (event.text === "v") { win.enterEditorVisual("visual"); return; }
                     if (event.text === "V") { win.enterEditorVisual("visualLine"); return; }
-                    if (event.text === "D") { win.deleteToEndOfLine(); win.pendingD = false; return; }
+                    if (event.text === "D") { win.deleteToEndOfLine(); return; }
                     if (event.text === "d") {
-                        if (win.pendingD) { win.deleteCurrentLine(); win.pendingD = false; }
+                        if (hadD) win.deleteCurrentLine();
                         else win.pendingD = true;
                         return;
                     }
@@ -463,7 +502,6 @@ ApplicationWindow {
                     else if (event.key === Qt.Key_Right || event.text === "l") editor.cursorPosition = Math.min(editor.text.length, editor.cursorPosition + 1);
                     else if (event.key === Qt.Key_Down || event.text === "j") { const r = editor.cursorRectangle; editor.cursorPosition = editor.positionAt(r.x, r.y + r.height * 1.5); }
                     else if (event.key === Qt.Key_Up || event.text === "k") { const r = editor.cursorRectangle; editor.cursorPosition = editor.positionAt(r.x, r.y - r.height * 0.5); }
-                    win.pendingD = false; // any key other than the first "d" cancels a pending dd
                 }
             }
         }
@@ -624,9 +662,24 @@ ApplicationWindow {
                             const lineStartOf = (pos) => text.lastIndexOf("\n", pos - 1) + 1;
                             const lineEndOf = (pos) => { const i = text.indexOf("\n", pos); return i === -1 ? text.length : i; };
 
+                            // As in the editor, a pending "g" lives only
+                            // until the very next key — read and clear it
+                            // up front so no branch leaves one stale.
+                            const hadG = win.previewPendingG;
+                            win.previewPendingG = false;
+
                             let handled = true;
                             if (event.key === Qt.Key_Escape) {
                                 win.exitVisualMode();
+                            } else if (event.text === "g") {
+                                // gg / G extend the selection to the very
+                                // top / bottom of this version — the whole
+                                // point of a visual selection in a note
+                                // too long to scroll through by hand.
+                                if (hadG) previewArea.cursorPosition = 0;
+                                else win.previewPendingG = true;
+                            } else if (event.text === "G") {
+                                previewArea.cursorPosition = text.length;
                             } else if (event.text === "y" || (event.key === Qt.Key_C && (event.modifiers & Qt.ControlModifier))) {
                                 win.yankPreviewSelection();
                             } else if (event.key === Qt.Key_Left || event.text === "h") {
@@ -675,10 +728,12 @@ ApplicationWindow {
                                 return "esc vim mode · ctrl+s save · ? help";
                             const label = win.editorMode === "visualLine" ? "VISUAL LINE"
                                 : win.editorMode === "visual" ? "VISUAL" : "NORMAL";
-                            return "-- " + label + " --" + (win.pendingD ? "  d" : "") + "   ?  help";
+                            const pending = win.pendingD ? "  d" : win.pendingG ? "  g" : "";
+                            return "-- " + label + " --" + pending + "   ?  help";
                         }
                         if (win.previewSelMode !== "none")
-                            return "h/j/k/l move · y/ctrl+c/super+c yank · esc cancel selection";
+                            return "h/j/k/l move · gg/G top/bottom · y/ctrl+c/super+c yank · esc cancel"
+                                + (win.previewPendingG ? "   g" : "");
                         return "j/k/↑/↓ move · / search · v/V visual select · enter restore · esc back";
                     }
                 }
@@ -798,6 +853,8 @@ ApplicationWindow {
                             { title: "Normal mode", items: [
                                 { key: "i", desc: "Back to Insert mode (resume typing)" },
                                 { key: "h j k l", desc: "Move the cursor (arrows too)" },
+                                { key: "gg", desc: "Jump to the top of the note" },
+                                { key: "G", desc: "Jump to the bottom of the note" },
                                 { key: "v", desc: "Visual mode (character)" },
                                 { key: "V", desc: "Visual line mode" },
                                 { key: "dd", desc: "Delete the line (copied to clipboard)" },
@@ -806,6 +863,7 @@ ApplicationWindow {
                             ]},
                             { title: "Visual mode", items: [
                                 { key: "h j k l", desc: "Extend the selection" },
+                                { key: "gg / G", desc: "Extend to the top / bottom of the note" },
                                 { key: "y", desc: "Yank selection to clipboard" },
                                 { key: "d / x", desc: "Delete selection (copied to clipboard)" },
                                 { key: "Esc", desc: "Cancel, back to Normal mode" }
