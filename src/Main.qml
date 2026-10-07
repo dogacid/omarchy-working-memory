@@ -352,8 +352,15 @@ ApplicationWindow {
     // Esc from Insert mode enters vim Normal mode. Once editorMode has left
     // "insert", the editor's own Keys.onPressed (below) handles Esc itself
     // (cancel visual / already-normal no-op) — this Shortcut is disabled at
-    // that point so the two never race for the same keypress.
-    Shortcut { sequence: "Escape"; enabled: win.mode === "edit" && win.editorMode === "insert"; onActivated: win.enterEditorNormalMode() }
+    // that point so the two never race for the same keypress. Also disabled
+    // while an overlay owns Esc (topic switcher/creator, error banner): two
+    // enabled Shortcuts on one sequence are ambiguous and Qt fires neither.
+    Shortcut {
+        sequence: "Escape"
+        enabled: win.mode === "edit" && win.editorMode === "insert"
+                 && !win.showTopicSwitcher && !win.showTopicCreator && backend.lastError === ""
+        onActivated: win.enterEditorNormalMode()
+    }
 
     Connections {
         target: backend
