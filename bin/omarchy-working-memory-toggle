@@ -6,11 +6,20 @@
 # to reach anything else. Close it normally (Super+W) when you're done.
 #
 # Bound to both the Super+N keybinding and the bar icon click, so both
-# trigger the exact same behavior.
+# trigger the exact same behavior. Works under Hyprland (Omarchy) and sway.
 set -euo pipefail
 
 APP_ID="omarchy-working-memory"
 BIN="$(command -v omarchy-working-memory || echo "$HOME/.local/bin/omarchy-working-memory")"
+
+# sway (archsway): criteria focus fails with no match, so it doubles as the
+# "is it running?" check.
+if [[ -n ${SWAYSOCK:-} ]]; then
+  swaymsg -q "[app_id=\"^$APP_ID\$\"] focus" 2>/dev/null && exit 0
+  setsid "$BIN" >/dev/null 2>&1 &
+  disown
+  exit 0
+fi
 
 is_running() {
   hyprctl clients -j | jq -e --arg c "$APP_ID" '.[] | select(.class == $c)' >/dev/null 2>&1

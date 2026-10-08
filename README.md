@@ -72,7 +72,7 @@ wrapper around shelling out to `git`.
 
 ## Install
 
-On another Omarchy (Arch-based) machine:
+On another Omarchy (Arch-based) machine, or an archsway (Arch + sway) one:
 
 ```sh
 sudo pacman -S --needed qt6-base qt6-declarative gcc make git jq
@@ -94,6 +94,31 @@ onto `~/.local/bin`, symlinks the Quickshell bar-widget plugin into
 `~/.config/omarchy/plugins/`, wires the Hyprland window rule + `Super+N`
 binding into `~/.config/hypr/`, and adds the bar icon via `omarchy bar put`.
 Re-running it after a `git pull` picks up any update — it's idempotent.
+
+### On sway (archsway)
+
+`install.sh` picks the desktop from what's configured: the Hyprland steps
+above run only if `~/.config/hypr/hyprland.lua` exists, and the sway steps
+run if `~/.config/sway` exists. On sway it symlinks
+`sway/working-memory.conf` (the floating-window rule + `Super+N`, the sway
+equivalent of `hypr/working-memory.lua`) into `~/.config/sway/config.d/`,
+which archsway's sway config includes, then reloads sway. The toggle script
+detects sway through `$SWAYSOCK` and uses `swaymsg` instead of `hyprctl`.
+
+What's different from Omarchy:
+
+- **No bar icon**: archsway uses waybar, not Omarchy's Quickshell bar, so
+  `Super+N` is the only way in.
+- **Theme**: there's no `~/.local/state/omarchy/current/theme/colors.toml`,
+  so the app uses its built-in Tokyo Night fallback, which is also
+  archsway's palette.
+- **`Super+C`/`Super+V`**: archsway's `archsway-clipboard` mirrors Omarchy's
+  universal clipboard keys and treats `omarchy-working-memory` as a normal
+  (non-terminal) window, so these send plain `Ctrl+C`/`Ctrl+V` here too.
+- **Sync**: the setup in [GitHub_Sync.md](GitHub_Sync.md) is the same.
+  archsway's seeded `~/.ssh/config_local` already includes the
+  `working-memory-sync` host block, so only the key itself (step 1) and the
+  remote (step 3) are needed.
 
 ## Keys
 
