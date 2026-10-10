@@ -112,6 +112,22 @@ QString continueAfter(const QString &id, const QStringList &existing) {
     return branchFrom(id, existing);
 }
 
+QString nextSibling(const QString &id) {
+    QStringList segs = segments(id);
+    if (segs.isEmpty())
+        return QString();
+    segs.last() = nextSegment(segs.last());
+    return segs.join(QString());
+}
+
+QString reroot(const QString &id, const QString &from, const QString &to) {
+    const QStringList segs = segments(id), fromSegs = segments(from), toSegs = segments(to);
+    if (segs.isEmpty() || fromSegs.isEmpty() || toSegs.size() != fromSegs.size()
+        || segs.size() < fromSegs.size() || segs.mid(0, fromSegs.size()) != fromSegs)
+        return QString();
+    return (toSegs + segs.mid(fromSegs.size())).join(QString());
+}
+
 QString branchFrom(const QString &id, const QStringList &existing) {
     const QStringList segs = segments(id);
     if (segs.isEmpty())

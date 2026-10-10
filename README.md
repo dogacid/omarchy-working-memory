@@ -257,6 +257,19 @@ topic, so it still works after being copied into another topic. In vim
 Normal mode, `Enter` or `gd` on a link opens that card, switching topic
 first if it has to, and `Ctrl+O` jumps back to where you were.
 
+**Two machines, same number.** Each machine hands out card numbers on
+its own, so two machines adding "the next card" to a topic while out of
+sync can both pick, say, `2`. A number only becomes final once it's been
+pushed: before pulling, a sync checks whether this machine's unpushed new
+cards clash with cards the other machine added meanwhile. This machine's
+copy is the provisional one (no one else has seen it, so nothing links to
+it yet), so it moves to the next free number at the same position (`2` →
+`3`, or `4` if `3` is taken too). Its branches move with it (`2a` → `3a`),
+links to it in that topic are updated, and if it's the card you have open,
+you just keep typing in it under its new number. The footer says what
+moved. Without this, git would have merged the two different cards into
+one.
+
 Each card is a plain file, `cards/<number>.txt`, on the topic's branch.
 Cards are saved, committed and synced exactly like the note, `Ctrl+R` shows
 the history of whichever card is open, and the window title and footer show

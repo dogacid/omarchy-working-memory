@@ -9,6 +9,7 @@
 #include <QLockFile>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
 #include <QStandardPaths>
@@ -427,6 +428,142 @@ QString GitStore::mergeText(const QString &base, const QString &ours, const QStr
     const QString out = gitOutput({QStringLiteral("merge-file"), QStringLiteral("-p"), QStringLiteral("--union"),
                                    paths.at(0), paths.at(1), paths.at(2)}, ok);
     return out;
+}
+
+bool GitStore::resolveCardClashes(const QString &branch) {
+    const QString remoteRef = QStringLiteral("refs/remotes/origin/") + branch;
+    bool ok = false;
+    gitOutput({QStringLiteral("rev-parse"), QStringLiteral("--verify"), QStringLiteral("-q"), remoteRef}, &ok);
+    if (!ok)
+        return true; // nothing fetched for this branch yet: nothing to clash with
+
+    auto idsAt = [&](const QString &ref) {
+        QStringList ids;
+        const QString out = gitOutput({QStringLiteral("ls-tree"), QStringLiteral("--name-only"), ref,
+                                       QLatin1String(kCardsDir) + QLatin1Char('/')}, &ok);
+        for (const QString &p : out.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+            QString card;
+            if (documentCard(p, &card) && !card.isEmpty())
+                ids << card;
+        }
+        return ids;
+    };
+    // Cards added on one side since the two histories last met. With no
+    // common ancestor (a machine's first sync onto a populated remote),
+    // every card on each side counts as added.
+    const QString base = gitOutput({QStringLiteral("merge-base"), QStringLiteral("HEAD"), remoteRef}, &ok).trimmed();
+    const bool haveBase = ok && !base.isEmpty();
+    auto addedOn = [&](const QString &ref) {
+        if (!haveBase)
+            return idsAt(ref);
+        QStringList ids;
+        const QString out = gitOutput({QStringLiteral("diff"), QStringLiteral("--name-only"), QStringLiteral("--diff-filter=A"),
+                                       QStringLiteral("--no-renames"), base, ref, QStringLiteral("--"),
+                                       QLatin1String(kCardsDir) + QLatin1Char('/')}, &ok);
+        for (const QString &p : out.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+            QString card;
+            if (documentCard(p, &card) && !card.isEmpty())
+                ids << card;
+        }
+        return ids;
+    };
+
+    const QStringList localAdded = addedOn(QStringLiteral("HEAD"));
+    if (localAdded.isEmpty())
+        return true;
+    const QStringList remoteAdded = addedOn(remoteRef);
+    QStringList clashes;
+    for (const QString &id : localAdded) {
+        if (remoteAdded.contains(id))
+            clashes << id;
+    }
+    if (clashes.isEmpty())
+        return true;
+    // Shallowest first, so a card that moves takes its branches with it
+    // before they're considered on their own.
+    std::sort(clashes.begin(), clashes.end(), [](const QString &a, const QString &b) {
+        return Cards::depth(a) != Cards::depth(b) ? Cards::depth(a) < Cards::depth(b) : Cards::lessThan(a, b);
+    });
+
+    QSet<QString> taken;
+    for (const QString &id : idsAt(QStringLiteral("HEAD")) + idsAt(remoteRef))
+        taken.insert(id);
+    QVariantMap renamed; // old → new
+    for (const QString &root : clashes) {
+        if (renamed.contains(root))
+            continue;
+        QStringList subtree;
+        for (const QString &id : localAdded) {
+            if (!renamed.contains(id) && !Cards::reroot(id, root, root).isEmpty())
+                subtree << id;
+        }
+        // The next number along that's free for the card and every branch
+        // moving with it.
+        QString to = root;
+        for (;;) {
+            to = Cards::nextSibling(to);
+            bool free = true;
+            for (const QString &id : subtree) {
+                if (taken.contains(Cards::reroot(id, root, to)))
+                    free = false;
+            }
+            if (free)
+                break;
+        }
+        for (const QString &id : subtree) {
+            const QString moved = Cards::reroot(id, root, to);
+            renamed.insert(id, moved);
+            taken.insert(moved);
+        }
+    }
+
+    for (auto it = renamed.cbegin(); it != renamed.cend(); ++it) {
+        if (!git({QStringLiteral("mv"), cardRelPath(it.key()), cardRelPath(it.value().toString())})) {
+            setError(QStringLiteral("renumbering clashing card ") + it.key() + QStringLiteral(": ") + errorString());
+            return false;
+        }
+    }
+
+    // Links to the moved cards from anything in this topic.
+    const QString topic = currentTopic();
+    QStringList docs{QLatin1String(kFileName)};
+    for (const QString &id : cardIds())
+        docs << cardRelPath(id);
+    for (const QString &rel : docs) {
+        QFile f(m_dir + QLatin1Char('/') + rel);
+        if (!f.open(QIODevice::ReadOnly))
+            continue;
+        const QString before = QString::fromUtf8(f.readAll());
+        f.close();
+        QString after = before;
+        static const QRegularExpression link(QStringLiteral("\\[\\[([^\\]:\\n]+):([0-9a-z]+)\\]\\]"));
+        QRegularExpressionMatchIterator m = link.globalMatch(before);
+        // Replace back to front so earlier offsets stay valid.
+        QList<QRegularExpressionMatch> hits;
+        while (m.hasNext())
+            hits.prepend(m.next());
+        for (const QRegularExpressionMatch &h : hits) {
+            if (h.captured(1) == topic && renamed.contains(h.captured(2)))
+                after.replace(h.capturedStart(), h.capturedLength(),
+                              QStringLiteral("[[") + topic + QLatin1Char(':') + renamed.value(h.captured(2)).toString() + QStringLiteral("]]"));
+        }
+        if (after != before) {
+            QSaveFile out(m_dir + QLatin1Char('/') + rel);
+            if (out.open(QIODevice::WriteOnly)) {
+                out.write(after.toUtf8());
+                out.commit();
+            }
+        }
+    }
+
+    QStringList moves;
+    for (auto it = renamed.cbegin(); it != renamed.cend(); ++it)
+        moves << it.key() + QStringLiteral(" → ") + it.value().toString();
+    if (!commitWithMessage(QStringLiteral("Renumber ") + moves.join(QStringLiteral(", "))
+                               + QStringLiteral(" (also created on another machine)"), nullptr))
+        return false;
+    emit cardsRenumbered(topic, renamed);
+    return true;
 }
 
 bool GitStore::commitToBranch(const QString &branch, const QString &message,
@@ -869,6 +1006,9 @@ bool GitStore::pullFromRemote(bool *conflict) {
         return true; // nothing on the remote yet — nothing to pull
 
     if (syncCancelled())
+        return false;
+
+    if (!resolveCardClashes(branch))
         return false;
 
     // open() creates working-memory.txt directly on disk, outside git, so on

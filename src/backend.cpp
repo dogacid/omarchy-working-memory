@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QFile>
 #include <QElapsedTimer>
+#include <QCoreApplication>
 #include <QGuiApplication>
 #include <QJsonDocument>
 #include <QLocalSocket>
@@ -46,6 +47,7 @@ Backend::Backend(QObject *parent) : QObject(parent) {
     connect(&m_unlockTimer, &QTimer::timeout, this, &Backend::unlockAfterStartup);
     // Queued: emitted on the sync's worker thread.
     connect(&m_store, &GitStore::pulled, this, &Backend::onPulled, Qt::QueuedConnection);
+    connect(&m_store, &GitStore::cardsRenumbered, this, &Backend::onCardsRenumbered, Qt::QueuedConnection);
     connect(&m_captureServer, &QLocalServer::newConnection, this, &Backend::onCaptureConnection);
     connect(&m_syncWatcher, &QFutureWatcher<GitStore::SyncOutcome>::finished, this, &Backend::onSyncFinished);
     connect(&m_topicWatcher, &QFutureWatcher<QString>::finished, this, &Backend::onTopicOpFinished);
@@ -261,6 +263,10 @@ void Backend::settleSync() {
         return;
     m_store.requestCancelSync();
     m_syncWatcher.waitForFinished();
+    // Deliver what the sync's thread queued for us before it finished — a
+    // renumbering in particular must reach onCardsRenumbered() before
+    // anything below reads or writes the open card by its (old) path.
+    QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
     m_syncSettled = true;
     processSyncOutcome(m_syncWatcher.result());
 }
@@ -271,6 +277,21 @@ void Backend::onSyncFinished() {
         return;
     }
     processSyncOutcome(m_syncWatcher.result());
+}
+
+void Backend::onCardsRenumbered(const QString &topic, const QVariantMap &renamed) {
+    QStringList moves;
+    for (auto it = renamed.cbegin(); it != renamed.cend(); ++it)
+        moves << it.key() + QStringLiteral(" is now ") + it.value().toString();
+    emit notice(QStringLiteral("another machine also made card ") + renamed.firstKey()
+                + QStringLiteral(" — yours moved: ") + moves.join(QStringLiteral(", ")));
+    if (topic != m_store.currentTopic() || !renamed.contains(m_store.activeCard()))
+        return;
+    // Same document, new path. The text on disk may also differ now (a
+    // link to a moved card rewritten), which the post-pull merge picks up
+    // against m_diskText as usual.
+    m_store.setActiveCard(renamed.value(m_store.activeCard()).toString());
+    emit currentCardChanged();
 }
 
 void Backend::onPulled() {

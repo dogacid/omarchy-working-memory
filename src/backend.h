@@ -214,6 +214,9 @@ private:
     // GitStore::pulled(), delivered on the UI thread while the push is
     // still running: merge what arrived and release the launch lock now.
     void onPulled();
+    // GitStore::cardsRenumbered(): if the open card was one of them, keep
+    // editing it under its new number, and say what happened.
+    void onCardsRenumbered(const QString &topic, const QVariantMap &renamed);
     void onCaptureConnection();
     QJsonObject handleCaptureRequest(const QJsonObject &request);
     void refreshInboxCount();

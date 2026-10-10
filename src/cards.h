@@ -41,5 +41,11 @@ QString continueAfter(const QString &id, const QStringList &existing);
 // Always a branch: the next free child of id, after any it already has
 // (1 → 1a; 1 → 1b once 1a exists).
 QString branchFrom(const QString &id, const QStringList &existing);
+// The same position one step along: the last run incremented (2 → 3,
+// 1b → 1c), whether or not that number is free.
+QString nextSibling(const QString &id);
+// id re-rooted from one card to another at the same depth: with from "2"
+// and to "3", "2a1" becomes "3a1". Empty if id isn't from or under it.
+QString reroot(const QString &id, const QString &from, const QString &to);
 
 }

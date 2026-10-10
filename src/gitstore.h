@@ -6,6 +6,7 @@
 #include <QHash>
 #include <QList>
 #include <QMutex>
+#include <QVariantMap>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -213,6 +214,9 @@ signals:
     // landed (or there was nothing to pull), before the push: the working
     // tree is up to date from here on, so the UI needn't wait for the push.
     void pulled();
+    // Emitted from syncWithRemote()'s thread when resolveCardClashes()
+    // renumbered cards on topic (old ID → new ID), before pulled().
+    void cardsRenumbered(const QString &topic, const QVariantMap &renamed);
 
 private:
     bool commitWithMessage(const QString &message, bool *committed);
@@ -243,6 +247,14 @@ private:
     // On failure, *conflict distinguishes a real merge conflict (needs the
     // user) from a routine failure like being offline (doesn't).
     bool pullFromRemote(bool *conflict = nullptr);
+    // Before a pull: cards this machine added (unpushed) under a number the
+    // remote has also added since the two last agreed would otherwise be
+    // union-merged into one card holding both texts. This machine's copy
+    // is the provisional one — nobody else can have seen or linked it yet —
+    // so it moves to the next free number at the same position (2 → 3),
+    // its unpushed branches with it (2a → 3a), and links to it in this
+    // topic follow; committed, then the pull merges cleanly.
+    bool resolveCardClashes(const QString &branch);
     bool pushToRemote();
     // Checked right before each network call in pullFromRemote()/
     // pushToRemote(); sets an explanatory error and returns true once
