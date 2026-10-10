@@ -293,11 +293,14 @@ wrote permanent cards from them.
   inbox.
 - The footer shows `inbox N` while anything's waiting.
 
-**Setup**, once per browser profile: run `./install.sh` (it registers the
-extension's native messaging host with Chromium, Chrome and Brave, for
-whichever you have), then open `chrome://extensions`, turn on Developer
-mode, choose **Load unpacked** and pick this repo's `extension/` folder.
-Change the shortcut at `chrome://extensions/shortcuts`.
+**Setup:** run `./install.sh`, then restart Chromium. It registers the
+extension's native messaging host with Chromium, Chrome and Brave
+(whichever you have), and adds `extension/` to the `--load-extension` list
+in `~/.config/chromium-flags.conf`, the same way Omarchy loads its own
+Chromium extensions, so it's there on every launch. If an Omarchy update
+ever rewrites that file, rerun `./install.sh`. For Chrome or Brave, load
+`extension/` by hand: `chrome://extensions`, Developer mode on, **Load
+unpacked**. Change the shortcut at `chrome://extensions/shortcuts`.
 
 How it works: the browser starts `omarchy-working-memory --native-host`,
 which passes the capture to the running app over a local socket, or, when

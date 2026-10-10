@@ -12,7 +12,9 @@
 #     ~/.config/sway/config.d/ (which archsway's sway config includes)
 #   - registers the browser capture extension's native messaging host with
 #     each Chromium-family browser that has a config dir (Chromium, Chrome,
-#     Brave); the extension itself is loaded by hand, see the README
+#     Brave), and adds the extension to Chromium's --load-extension list in
+#     ~/.config/chromium-flags.conf, the way Omarchy loads its own
+#     extensions (other browsers: load extension/ unpacked by hand)
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -95,6 +97,22 @@ if [[ ! -f "$HYPRLAND_LUA" && ! -d "$SWAY_DIR" ]]; then
   echo "only the binary and toggle script were installed." >&2
 fi
 
-echo "Browser capture: load $REPO_DIR/extension as an unpacked extension"
-echo "(chrome://extensions, Developer mode on, Load unpacked) — once."
+# Chromium reads extra command-line flags from this file; Omarchy ships it
+# with a --load-extension list of its own extensions. Add ours to that list
+# (only one --load-extension flag takes effect, so append, don't add a
+# second line). Takes effect the next time Chromium starts.
+CHROMIUM_FLAGS="$HOME/.config/chromium-flags.conf"
+EXTENSION_DIR="$REPO_DIR/extension"
+if [[ -f "$CHROMIUM_FLAGS" ]] && ! grep -qF "$EXTENSION_DIR" "$CHROMIUM_FLAGS"; then
+  cp "$CHROMIUM_FLAGS" "$CHROMIUM_FLAGS.bak.$(date +%s)"
+  if grep -q '^--load-extension=' "$CHROMIUM_FLAGS"; then
+    sed -i "s|^--load-extension=.*|&,$EXTENSION_DIR|" "$CHROMIUM_FLAGS"
+  else
+    printf '%s\n' "--load-extension=$EXTENSION_DIR" >>"$CHROMIUM_FLAGS"
+  fi
+  echo "Added the capture extension to $CHROMIUM_FLAGS (restart Chromium to load it)"
+elif [[ ! -f "$CHROMIUM_FLAGS" ]]; then
+  echo "Browser capture: load $EXTENSION_DIR as an unpacked extension"
+  echo "(chrome://extensions, Developer mode on, Load unpacked) — once."
+fi
 echo "Done. Press Super+N (or click the bar icon on Omarchy) to open the working-memory scratchpad."
