@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QLockFile>
+#include <QMap>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
@@ -607,14 +608,25 @@ QString GitStore::addInboxItem(const QString &text) {
     }
     const QString name = QDateTime::currentDateTime().toString(QLatin1String(kInboxTimeFormat))
         + QLatin1Char('-') + (host.isEmpty() ? QStringLiteral("host") : host) + QStringLiteral(".txt");
+    return writeInboxItem(name, text, QStringLiteral("Capture: ") + previewLine(text)) ? name : QString();
+}
 
+bool GitStore::updateInboxItem(const QString &name, const QString &text) {
+    if (name.isEmpty() || name.contains(QLatin1Char('/'))) {
+        setError(QStringLiteral("not an inbox item: ") + name);
+        return false;
+    }
+    return writeInboxItem(name, text, QStringLiteral("Edit: ") + name);
+}
+
+bool GitStore::writeInboxItem(const QString &name, const QString &text, const QString &message) {
     bool ok = false;
     const QString blob = gitRun({QStringLiteral("hash-object"), QStringLiteral("-w"), QStringLiteral("--stdin")}, &ok, text.toUtf8()).trimmed();
     if (!ok)
-        return QString();
+        return false;
     const QString path = QLatin1String(kInboxDir) + QLatin1Char('/') + name;
     for (int attempt = 0; attempt < 3; ++attempt) {
-        const bool done = commitToBranch(QLatin1String(kInboxBranch), QStringLiteral("Capture: ") + previewLine(text),
+        const bool done = commitToBranch(QLatin1String(kInboxBranch), message,
             [&](const QStringList &env) {
                 bool staged = false;
                 gitRun({QStringLiteral("update-index"), QStringLiteral("--add"), QStringLiteral("--cacheinfo"),
@@ -622,9 +634,9 @@ QString GitStore::addInboxItem(const QString &text) {
                 return staged;
             });
         if (done)
-            return name;
+            return true;
     }
-    return QString();
+    return false;
 }
 
 bool GitStore::removeInboxItem(const QString &name) {
@@ -730,13 +742,11 @@ void GitStore::syncInbox() {
     } else if (isAncestor(remote, local)) {
         push();
     } else {
-        // Both machines captured since they last agreed. Items are separate
-        // files with machine-unique names, so this merge is always clean;
-        // merge-tree does it without a working tree. If it somehow isn't,
-        // leave both sides alone for a human rather than guess.
-        const QString tree = gitOutput({QStringLiteral("merge-tree"), QStringLiteral("--write-tree"), local, remote}, &ok)
-                                 .section(QLatin1Char('\n'), 0, 0).trimmed();
-        if (!ok) {
+        // Both machines changed the inbox since they last agreed: merge
+        // item by item, without a working tree.
+        const QString base = gitOutput({QStringLiteral("merge-base"), local, remote}, &ok).trimmed();
+        const QString tree = mergeInboxTrees(ok ? base : QString(), local, remote);
+        if (tree.isEmpty()) {
             logError(QStringLiteral("inbox: couldn't merge the two machines' inboxes: ") + errorString());
             return;
         }
@@ -745,6 +755,73 @@ void GitStore::syncInbox() {
         if (ok && git({QStringLiteral("update-ref"), localRef, commit, local}))
             push();
     }
+}
+
+QString GitStore::mergeInboxTrees(const QString &base, const QString &local, const QString &remote) {
+    // name → blob for each side's items/ (empty base: nothing in common).
+    auto items = [&](const QString &commit) {
+        QMap<QString, QString> out;
+        if (commit.isEmpty())
+            return out;
+        bool ok = false;
+        const QString listing = gitOutput({QStringLiteral("ls-tree"), commit, QLatin1String(kInboxDir) + QLatin1Char('/')}, &ok);
+        for (const QString &line : listing.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+            // "<mode> blob <sha>\t<path>"
+            const int tab = line.indexOf(QLatin1Char('\t'));
+            const QStringList meta = line.left(tab).split(QLatin1Char(' '));
+            if (tab > 0 && meta.size() == 3 && meta.at(1) == QStringLiteral("blob"))
+                out.insert(line.mid(tab + 1), meta.at(2));
+        }
+        return out;
+    };
+    auto content = [&](const QString &blob) {
+        bool ok = false;
+        return blob.isEmpty() ? QString() : gitOutput({QStringLiteral("cat-file"), QStringLiteral("blob"), blob}, &ok);
+    };
+    const QMap<QString, QString> b = items(base), l = items(local), r = items(remote);
+    QSet<QString> paths;
+    for (const auto *side : {&b, &l, &r}) {
+        for (auto it = side->cbegin(); it != side->cend(); ++it)
+            paths.insert(it.key());
+    }
+
+    QTemporaryDir tmp;
+    if (!tmp.isValid()) {
+        setError(QStringLiteral("no temp dir for the inbox merge"));
+        return QString();
+    }
+    const QStringList env{QStringLiteral("GIT_INDEX_FILE=") + tmp.filePath(QStringLiteral("index"))};
+    bool ok = false;
+    gitRun({QStringLiteral("read-tree"), QStringLiteral("--empty")}, &ok, QByteArray(), env);
+    if (!ok)
+        return QString();
+    QByteArray index; // update-index --index-info lines
+    for (const QString &path : paths) {
+        const QString bb = b.value(path), lb = l.value(path), rb = r.value(path);
+        QString keep;
+        if (lb == rb || rb == bb)
+            keep = lb; // same on both, or only this side changed it
+        else if (lb == bb)
+            keep = rb; // only the other side changed it
+        else if (lb.isEmpty() || rb.isEmpty())
+            keep = lb.isEmpty() ? rb : lb; // edited on one, filed on the other: keep the edit
+        else {
+            bool merged = false;
+            const QString text = mergeText(content(bb), content(lb), content(rb), &merged);
+            if (!merged)
+                return QString();
+            keep = gitRun({QStringLiteral("hash-object"), QStringLiteral("-w"), QStringLiteral("--stdin")}, &ok, text.toUtf8()).trimmed();
+            if (!ok)
+                return QString();
+        }
+        if (!keep.isEmpty())
+            index += (QStringLiteral("100644 ") + keep + QLatin1Char('\t') + path + QLatin1Char('\n')).toUtf8();
+    }
+    gitRun({QStringLiteral("update-index"), QStringLiteral("--index-info")}, &ok, index, env);
+    if (!ok)
+        return QString();
+    const QString tree = gitRun({QStringLiteral("write-tree")}, &ok, QByteArray(), env).trimmed();
+    return ok ? tree : QString();
 }
 
 QString GitStore::readDocumentOn(const QString &branch, const QString &card) const {

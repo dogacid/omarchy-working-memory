@@ -140,6 +140,9 @@ public:
     QString addInboxItem(const QString &text);
     // Oldest first: the order they're meant to be worked through.
     QList<InboxItem> inboxItems() const;
+    // Replaces an item's text (an edit made before filing it). If another
+    // machine filed it meanwhile, this puts it back: an edit is never lost.
+    bool updateInboxItem(const QString &name, const QString &text);
     bool removeInboxItem(const QString &name);
     // Card IDs on any topic's branch, in slip-box order, without checking
     // it out (for placing a card in a topic you're not in).
@@ -233,9 +236,17 @@ private:
     // moves if nobody else moved it meanwhile.
     bool commitToBranch(const QString &branch, const QString &message,
                         const std::function<bool(const QStringList &env)> &edit);
+    // Writes text as inbox item `name` (adding or replacing it).
+    bool writeInboxItem(const QString &name, const QString &text, const QString &message);
     // Brings the local inbox branch and origin's together (fast-forward,
     // or a worktree-free merge) and pushes. Called from syncWithRemote().
     void syncInbox();
+    // The merge syncInbox() makes when both machines changed the inbox,
+    // decided item by item against their merge base: a side that changed an
+    // item wins over one that didn't; both edited → both versions kept
+    // (union merge); edited on one, filed on the other → the edit stays, so
+    // nothing written is ever dropped. Returns the merged tree, or empty.
+    QString mergeInboxTrees(const QString &base, const QString &local, const QString &remote);
     void ensureIdentity();
     // Normalizes onto a single, fixed branch name regardless of this
     // machine's `init.defaultBranch` — otherwise two machines with

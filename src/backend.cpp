@@ -869,6 +869,14 @@ QString Backend::discardInboxItem(const QString &name) {
     return QString();
 }
 
+QString Backend::updateInboxItem(const QString &name, const QString &text) {
+    if (!m_store.updateInboxItem(name, text))
+        return QStringLiteral("couldn't save the edit: ") + m_store.errorString();
+    refreshInboxCount(); // it may have been filed elsewhere and come back
+    triggerSync();
+    return QString();
+}
+
 QString Backend::fileInboxItem(const QString &name, const QString &topic,
                                const QString &fromId, const QString &how) {
     QString text;

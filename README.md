@@ -294,7 +294,11 @@ wrote permanent cards from them.
     https://example.com/article   [2026-10-10 14:32]
   ```
 - **`Ctrl+B`** opens the inbox: captures on the left, oldest first, the
-  whole capture on the right. `j`/`k` move, `y` copies, `dd` discards.
+  whole capture on the right. `j`/`k` move, `y` copies, `dd` discards,
+  and `?` lists the inbox's keys. New captures appear while it's open.
+- **Editing:** `e` makes the capture editable, so you can trim a long
+  selection or note why you kept it before deciding where it goes. `Esc`
+  saves the edit (so does leaving the inbox).
 - **Filing:** `Enter` on a capture opens the card picker to choose its
   place. The header shows exactly what will happen ("enter → 3b (after
   3a) · b → 3a1 (branch)"). `Enter` files it after the highlighted card,
@@ -304,6 +308,9 @@ wrote permanent cards from them.
   away, so you can rewrite the capture in your own words. Filing into
   another topic switches to it; `Ctrl+O` comes back. `Esc` returns to the
   inbox.
+- **Filing for later:** `n` files the capture straight away as the next
+  top-level card in the current topic, for when it matters but its place
+  in the slip box can wait.
 - The footer shows `inbox N` while anything's waiting.
 
 **Setup:** run `./install.sh`, then restart Chromium. It registers the
@@ -321,7 +328,10 @@ the app isn't open, writes it to the inbox itself. The inbox is its own
 git branch, `inbox`, with one file per capture named by time and machine.
 It's written directly, never checked out, so a capture never disturbs what
 you're editing, and it syncs alongside everything else: captures from two
-machines merge cleanly, and filing one removes it on both.
+machines merge cleanly, and filing one removes it on both. Merges go
+capture by capture, and nothing written is ever lost. If both machines
+edited the same capture, it keeps both versions. If one machine edited it
+and the other filed it, the edit stays in the inbox.
 
 ### Headings and jumping (`Ctrl+1`..`Ctrl+9`)
 

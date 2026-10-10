@@ -130,6 +130,9 @@ public:
     // {name, time, title, snippet, text} per capture, oldest first.
     Q_INVOKABLE QVariantList inboxList() const;
     Q_INVOKABLE QString discardInboxItem(const QString &name);
+    // Saves an edit to a capture before it's filed. "" on success, else an
+    // error.
+    Q_INVOKABLE QString updateInboxItem(const QString &name, const QString &text);
     // Files a capture as a new card placed relative to fromId in topic
     // (continue or branch, as newCard()), removes it from the inbox and
     // opens the card. In another topic this switches topic first, in the

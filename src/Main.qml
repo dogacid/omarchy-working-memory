@@ -96,8 +96,65 @@ ApplicationWindow {
     property var filingItem: null
     property var filePrediction: ({ after: "", branch: "" })
     property bool pendingInboxD: false
+    // e on a capture: its preview becomes editable until Esc (or focus
+    // leaving it), which saves the edit back to the inbox.
+    property bool inboxEditing: false
 
-    onClosing: backend.save()
+    // The ? overlay's contents, a section per place in the app.
+    readonly property var helpSections: [
+        { title: "General", items: [
+            { key: "Ctrl+S", desc: "Save + commit immediately (forces a sync too)" },
+            { key: "Ctrl+R", desc: "Open history (time machine)" },
+            { key: "Alt+D", desc: "Insert today's date" },
+            { key: "Alt+T", desc: "Insert date + time" },
+            { key: "Ctrl+1..9", desc: "Jump to the Nth heading" },
+            { key: "Ctrl+T", desc: "Switch topic" },
+            { key: "Ctrl+Shift+T", desc: "Create a new topic" },
+            { key: "Ctrl+I", desc: "Index cards in this topic (l there links one here)" },
+            { key: "Ctrl+Shift+I", desc: "New card after the open one (Luhmann numbering)" },
+            { key: "Ctrl+O", desc: "Jump back to where a link or card took you from" },
+            { key: "Ctrl+B", desc: "Inbox: browser captures waiting to be filed" },
+            { key: "Esc", desc: "Enter vim Normal mode" }
+        ]},
+        { title: "Normal mode", items: [
+            { key: "i", desc: "Back to Insert mode (resume typing)" },
+            { key: "h j k l", desc: "Move the cursor (arrows too)" },
+            { key: "gg", desc: "Jump to the top of the note" },
+            { key: "G", desc: "Jump to the bottom of the note" },
+            { key: "v", desc: "Visual mode (character)" },
+            { key: "V", desc: "Visual line mode" },
+            { key: "dd", desc: "Delete the line (copied to clipboard)" },
+            { key: "D", desc: "Delete to end of line (copied to clipboard)" },
+            { key: "Enter / gd", desc: "Follow the [[topic:card]] link under the cursor" },
+            { key: "?", desc: "Toggle this help" }
+        ]},
+        { title: "Visual mode", items: [
+            { key: "h j k l", desc: "Extend the selection" },
+            { key: "gg / G", desc: "Extend to the top / bottom of the note" },
+            { key: "y", desc: "Yank selection to clipboard" },
+            { key: "d / x", desc: "Delete selection (copied to clipboard)" },
+            { key: "Esc", desc: "Cancel, back to Normal mode" }
+        ]},
+        { title: "Index cards (Ctrl+I)", items: [
+            { key: "j / k", desc: "Move through the cards" },
+            { key: "Enter", desc: "Open the card" },
+            { key: "l", desc: "Insert a link to it where you were typing" },
+            { key: "y", desc: "Copy a link to it" },
+            { key: "c / b", desc: "New card after it / branching off it" },
+            { key: "/", desc: "Search every topic (topic: lists a topic's cards)" }
+        ]},
+        { title: "Inbox (Ctrl+B)", items: [
+            { key: "j / k", desc: "Move through the captures (oldest first)" },
+            { key: "Enter / f", desc: "Place it: pick a card, then Enter files it after, b branches off it" },
+            { key: "n", desc: "File it now as the next top-level card in this topic" },
+            { key: "e", desc: "Edit it before filing (Esc saves)" },
+            { key: "dd", desc: "Discard it" },
+            { key: "y", desc: "Copy it to the clipboard" },
+            { key: "Esc", desc: "Back to the editor" }
+        ]}
+    ]
+
+    onClosing: { win.finishInboxEdit(false); backend.save(); }
 
     function openHistory() {
         historyEntries = backend.historyEntries();
@@ -371,6 +428,46 @@ ApplicationWindow {
         win.showSelectedInbox();
         inboxListView.forceActiveFocus();
     }
+    // Re-reads the inbox (a capture arrived, or a sync brought some),
+    // staying on the same capture where it still exists.
+    function refreshInbox() {
+        const name = win.selectedInbox ? win.selectedInbox.name : "";
+        win.inboxEntries = backend.inboxList();
+        let i = win.inboxEntries.findIndex(e => e.name === name);
+        if (i < 0) i = Math.min(inboxListView.currentIndex, win.inboxEntries.length - 1);
+        inboxListView.currentIndex = win.inboxEntries.length > 0 ? Math.max(0, i) : -1;
+        win.showSelectedInbox();
+    }
+    function startInboxEdit() {
+        if (!win.selectedInbox) return;
+        win.inboxEditing = true;
+        inboxPreview.forceActiveFocus();
+        inboxPreview.cursorPosition = inboxPreview.length;
+    }
+    // Saves the edit, if anything changed. refocus: back to the list (not
+    // when focus left for somewhere else, like Ctrl+B back to the editor).
+    function finishInboxEdit(refocus) {
+        if (!win.inboxEditing) return;
+        win.inboxEditing = false;
+        const item = win.selectedInbox;
+        if (item && inboxPreview.text !== item.text) {
+            const err = backend.updateInboxItem(item.name, inboxPreview.text);
+            win.flash(err ? err : "edit saved");
+            win.refreshInbox();
+        }
+        if (refocus) inboxListView.forceActiveFocus();
+    }
+    // n on a capture: file it now as the next top-level card in this topic
+    // — for when it matters but its place in the slip box can wait (the
+    // card can still be linked to and from later).
+    function quickFileInbox() {
+        if (!win.selectedInbox || win.topicBusy) return;
+        win.pushJump();
+        const err = backend.fileInboxItem(win.selectedInbox.name, backend.currentTopic, "", "continue");
+        if (err) { win.jumpStack = win.jumpStack.slice(0, -1); win.flash(err); return; }
+        win.backToEdit();
+        win.flash("filed as card " + backend.currentCard);
+    }
     function showSelectedInbox() {
         const i = inboxListView.currentIndex;
         win.selectedInbox = i >= 0 && i < win.inboxEntries.length ? win.inboxEntries[i] : null;
@@ -403,6 +500,8 @@ ApplicationWindow {
     // Esc from the picker while filing goes back to the inbox, not the
     // editor — one step back, the way Esc works everywhere else here.
     function escapeFromMode() {
+        if (win.showHelp) { win.showHelp = false; return; }
+        if (win.mode === "inbox" && win.inboxEditing) { win.finishInboxEdit(true); return; }
         if (win.mode === "cards" && win.filingItem) { win.filingItem = null; win.openInbox(); return; }
         win.backToEdit();
     }
@@ -685,6 +784,7 @@ ApplicationWindow {
     Connections {
         target: backend
         function onNotice(message) { win.flash(message); }
+        function onInboxChanged() { if (win.mode === "inbox" && !win.inboxEditing) win.refreshInbox(); }
         function onTopicOpFinished(error) {
             win.topicBusy = false;
             if (error) {
@@ -1146,6 +1246,7 @@ ApplicationWindow {
 
                     Keys.onPressed: function (event) {
                         if (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) return;
+                        if (win.showHelp) { if (event.text === "?") win.showHelp = false; event.accepted = true; return; }
                         const hadD = win.pendingInboxD;
                         win.pendingInboxD = false;
                         let handled = true;
@@ -1153,6 +1254,9 @@ ApplicationWindow {
                         else if (event.text === "k") inboxListView.currentIndex = Math.max(inboxListView.currentIndex - 1, 0);
                         else if (event.text === "d") { if (hadD) win.discardSelectedInbox(); else win.pendingInboxD = true; }
                         else if (event.text === "y") { if (win.selectedInbox) { backend.copyToClipboard(win.selectedInbox.text); win.flash("copied"); } }
+                        else if (event.text === "e") win.startInboxEdit();
+                        else if (event.text === "n") win.quickFileInbox();
+                        else if (event.text === "?") win.showHelp = true;
                         else if (event.text === "f" || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) win.startFiling();
                         else handled = false;
                         if (handled) event.accepted = true;
@@ -1185,16 +1289,22 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 TextArea {
-                    readOnly: true
+                    id: inboxPreview
+                    readOnly: !win.inboxEditing
                     selectByMouse: true
                     wrapMode: TextArea.Wrap
                     text: win.selectedInbox ? win.selectedInbox.text : ""
+                    onActiveFocusChanged: if (!activeFocus) win.finishInboxEdit(false)
                     font.family: "monospace"
                     font.pixelSize: 15
                     color: backend.themeForeground
                     selectionColor: backend.themeSelection
                     selectedTextColor: backend.themeForeground
-                    background: Rectangle { color: Qt.darker(backend.themeBackground, 1.08) }
+                    background: Rectangle {
+                        color: Qt.darker(backend.themeBackground, 1.08)
+                        border.color: backend.themeAccent
+                        border.width: win.inboxEditing ? 1 : 0
+                    }
                     topPadding: 12
                     leftPadding: 16
                     rightPadding: 16
@@ -1418,9 +1528,11 @@ ApplicationWindow {
                             const pending = win.pendingD ? "  d" : win.pendingG ? "  g" : "";
                             return "-- " + label + " --" + pending + "   ?  help";
                         }
+                        if (win.mode === "inbox" && win.inboxEditing)
+                            return "editing this capture · esc saves it";
                         if (win.mode === "inbox")
                             return win.pendingInboxD ? "d again to discard this capture · any other key cancels"
-                                : "j/k move · enter file it · dd discard · y copy · esc back";
+                                : "j/k move · enter place it · n file as next card · e edit · dd discard · y copy · ? help · esc back";
                         if (win.mode === "cards" && win.filingItem)
                             return "placing “" + win.filingItem.title + "” · enter after · b branch · topic: lists a topic · / search · esc back to inbox";
                         if (win.mode === "cards")
@@ -1536,41 +1648,9 @@ ApplicationWindow {
                     }
 
                     Repeater {
-                        model: [
-                            { title: "General", items: [
-                                { key: "Ctrl+S", desc: "Save + commit immediately (forces a sync too)" },
-                                { key: "Ctrl+R", desc: "Open history (time machine)" },
-                                { key: "Alt+D", desc: "Insert today's date" },
-                                { key: "Alt+T", desc: "Insert date + time" },
-                                { key: "Ctrl+1..9", desc: "Jump to the Nth heading" },
-                                { key: "Ctrl+T", desc: "Switch topic" },
-                                { key: "Ctrl+Shift+T", desc: "Create a new topic" },
-                                { key: "Ctrl+I", desc: "Index cards in this topic (l there links one here)" },
-                                { key: "Ctrl+Shift+I", desc: "New card after the open one (Luhmann numbering)" },
-                                { key: "Ctrl+O", desc: "Jump back to where a link or card took you from" },
-                                { key: "Ctrl+B", desc: "Inbox: browser captures waiting to be filed" },
-                                { key: "Esc", desc: "Enter vim Normal mode" }
-                            ]},
-                            { title: "Normal mode", items: [
-                                { key: "i", desc: "Back to Insert mode (resume typing)" },
-                                { key: "h j k l", desc: "Move the cursor (arrows too)" },
-                                { key: "gg", desc: "Jump to the top of the note" },
-                                { key: "G", desc: "Jump to the bottom of the note" },
-                                { key: "v", desc: "Visual mode (character)" },
-                                { key: "V", desc: "Visual line mode" },
-                                { key: "dd", desc: "Delete the line (copied to clipboard)" },
-                                { key: "D", desc: "Delete to end of line (copied to clipboard)" },
-                                { key: "Enter / gd", desc: "Follow the [[topic:card]] link under the cursor" },
-                                { key: "?", desc: "Toggle this help" }
-                            ]},
-                            { title: "Visual mode", items: [
-                                { key: "h j k l", desc: "Extend the selection" },
-                                { key: "gg / G", desc: "Extend to the top / bottom of the note" },
-                                { key: "y", desc: "Yank selection to clipboard" },
-                                { key: "d / x", desc: "Delete selection (copied to clipboard)" },
-                                { key: "Esc", desc: "Cancel, back to Normal mode" }
-                            ]}
-                        ]
+                        // Opened from the inbox, its section comes first.
+                        model: win.mode !== "inbox" ? win.helpSections
+                            : win.helpSections.filter(s => s.title.startsWith("Inbox")).concat(win.helpSections.filter(s => !s.title.startsWith("Inbox")))
                         delegate: Column {
                             width: helpColumn.width
                             topPadding: index === 0 ? 0 : 10
@@ -1592,12 +1672,12 @@ ApplicationWindow {
                                         color: backend.themeForeground
                                         font.family: "monospace"
                                         font.bold: true
-                                        width: 90
+                                        width: 110
                                     }
                                     Text {
                                         text: modelData.desc
                                         color: backend.themeMuted
-                                        width: parent.width - 102
+                                        width: parent.width - 122
                                         wrapMode: Text.Wrap
                                     }
                                 }
