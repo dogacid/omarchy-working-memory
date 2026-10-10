@@ -1,0 +1,8 @@
+#!/bin/sh
+# The browser capture extension's native messaging host (see src/capture.h):
+# Chromium starts this, by the absolute path install.sh writes into its
+# NativeMessagingHosts manifest, and talks JSON over stdin/stdout. A
+# separate script because a host manifest can name a program but not pass
+# it arguments. Resolves through the ~/.local/bin symlink to this repo.
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/../build/omarchy-working-memory" --native-host "$@"

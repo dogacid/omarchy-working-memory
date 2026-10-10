@@ -135,6 +135,7 @@ What's different from Omarchy:
 | `Ctrl+I`               | Index cards in this topic (see below)     |
 | `Ctrl+Shift+I`         | New index card after the open one         |
 | `Ctrl+O`               | Jump back after following a card link     |
+| `Ctrl+B`               | Inbox of browser captures (see below)     |
 | `Esc`                 | Enter vim Normal mode (see below); `?` once there for the full shortcut reference |
 
 Otherwise it's a normal text field — click-drag or `Shift`+arrows to select,
@@ -260,6 +261,51 @@ Each card is a plain file, `cards/<number>.txt`, on the topic's branch.
 Cards are saved, committed and synced exactly like the note, `Ctrl+R` shows
 the history of whichever card is open, and the window title and footer show
 which card that is. A new topic starts with no cards.
+
+### Browser capture and the inbox (`Ctrl+B`)
+
+A small Chromium extension (in `extension/`) sends what you're reading to
+an **inbox**: the selected text, or a link, or just the page, along with
+its title and address. Captures wait there until you file them into the
+slip box, the way Luhmann made notes on a source first and only later
+wrote permanent cards from them.
+
+- **Capturing:** right-click a selection, a link or the page and choose
+  "Send … to Working Memory inbox", or press `Alt+Shift+W` (the selection
+  if there is one, else the page), or click the toolbar button. The button
+  flashes ✓ when it's in. This works whether or not the app is open.
+- **A capture** is plain text, ready to become a card:
+  ```
+  > the selected text, quoted
+  — Page title
+    https://example.com/article   [2026-10-10 14:32]
+  ```
+- **`Ctrl+B`** opens the inbox: captures on the left, oldest first, the
+  whole capture on the right. `j`/`k` move, `y` copies, `dd` discards.
+- **Filing:** `Enter` on a capture opens the card picker to choose its
+  place. The header shows exactly what will happen ("enter → 3b (after
+  3a) · b → 3a1 (branch)"). `Enter` files it after the highlighted card,
+  `b` as a branch of it, and the topic note row as the next top-level card.
+  Search finds the right card in any topic, and typing a topic name with a
+  colon (`garden:`) lists that topic's cards. The new card opens straight
+  away, so you can rewrite the capture in your own words. Filing into
+  another topic switches to it; `Ctrl+O` comes back. `Esc` returns to the
+  inbox.
+- The footer shows `inbox N` while anything's waiting.
+
+**Setup**, once per browser profile: run `./install.sh` (it registers the
+extension's native messaging host with Chromium, Chrome and Brave, for
+whichever you have), then open `chrome://extensions`, turn on Developer
+mode, choose **Load unpacked** and pick this repo's `extension/` folder.
+Change the shortcut at `chrome://extensions/shortcuts`.
+
+How it works: the browser starts `omarchy-working-memory --native-host`,
+which passes the capture to the running app over a local socket, or, when
+the app isn't open, writes it to the inbox itself. The inbox is its own
+git branch, `inbox`, with one file per capture named by time and machine.
+It's written directly, never checked out, so a capture never disturbs what
+you're editing, and it syncs alongside everything else: captures from two
+machines merge cleanly, and filing one removes it on both.
 
 ### Headings and jumping (`Ctrl+1`..`Ctrl+9`)
 

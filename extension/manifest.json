@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Working Memory capture",
+  "version": "0.1.0",
+  "description": "Send the selection, a link or the page to the omarchy-working-memory inbox.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7KOTj0XLEXqEMWFjzxzZDma/2HNjdARfMP6uwbjqP9Vg/j3e+POaebavlEIABAFX2jN2kDlmFM9PLLB2CHjJV6arUEyzyCJOFQ2x1PvWld4CHzpn/IbZxPQD3y/G/8tKPs0dIgzP7+lsmhBqD1Rg/OOIfDMRpKj8j/YJ0zvUDRzHO92lKKiE4rzNHp9t/jjwK0rwPLXK2ATwKQ9Godp6t9xOHl6fnHd0xEg1weX8uXNXiS2w8Z8gQ4glkhMY/+eeED9D3MbDglcrMuhdCEkPFyGt4lTXRFjsumw4O03I6MA9P7YgOwwO9xm0PnX/sNJJcAKbJGB3xjxvwbOhqWzAsQIDAQAB",
+  "permissions": [
+    "contextMenus",
+    "nativeMessaging",
+    "activeTab",
+    "scripting"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Send to the Working Memory inbox"
+  },
+  "commands": {
+    "capture": {
+      "suggested_key": {
+        "default": "Alt+Shift+W"
+      },
+      "description": "Send the selection (or the page) to the Working Memory inbox"
+    }
+  }
+}

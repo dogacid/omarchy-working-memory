@@ -1,5 +1,6 @@
 #include "backend.h"
 
+#include "capture.h"
 #include "cards.h"
 
 #include <QClipboard>
@@ -8,6 +9,8 @@
 #include <QFile>
 #include <QElapsedTimer>
 #include <QGuiApplication>
+#include <QJsonDocument>
+#include <QLocalSocket>
 #include <QRegularExpression>
 #include <QTextStream>
 #include <QThread>
@@ -43,6 +46,7 @@ Backend::Backend(QObject *parent) : QObject(parent) {
     connect(&m_unlockTimer, &QTimer::timeout, this, &Backend::unlockAfterStartup);
     // Queued: emitted on the sync's worker thread.
     connect(&m_store, &GitStore::pulled, this, &Backend::onPulled, Qt::QueuedConnection);
+    connect(&m_captureServer, &QLocalServer::newConnection, this, &Backend::onCaptureConnection);
     connect(&m_syncWatcher, &QFutureWatcher<GitStore::SyncOutcome>::finished, this, &Backend::onSyncFinished);
     connect(&m_topicWatcher, &QFutureWatcher<QString>::finished, this, &Backend::onTopicOpFinished);
     connect(&m_themeWatcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &) {
@@ -105,6 +109,17 @@ bool Backend::start() {
         return false;
     }
     m_diskText = m_pendingText;
+
+    // Captures from the browser (see capture.h). The instance lock open()
+    // just took means no other app owns this data dir, so a socket file
+    // left at this path can only be a crashed instance's: clear it. Not
+    // fatal if it fails: captures then land via the native host directly.
+    const QString sock = Capture::socketPath(m_store.dir());
+    QLocalServer::removeServer(sock);
+    m_captureServer.setSocketOptions(QLocalServer::UserAccessOption);
+    if (!m_captureServer.listen(sock))
+        m_store.logError(QStringLiteral("capture socket: ") + m_captureServer.errorString());
+    refreshInboxCount();
 
     loadOmarchyTheme();
     watchOmarchyTheme();
@@ -310,6 +325,7 @@ void Backend::processSyncOutcome(const GitStore::SyncOutcome &outcome) {
         return;
     }
     setStatus(m_unsaved ? QStringLiteral("editing…") : QStringLiteral("synced"));
+    refreshInboxCount(); // another machine's captures may have arrived
 }
 
 void Backend::reloadIfChanged() {
@@ -463,6 +479,7 @@ void Backend::onTopicOpFinished() {
         // show the error in, so it goes in the status line instead.
         setStatus(m_cardAfterSwitch.isEmpty() ? QStringLiteral("synced") : QStringLiteral("link: ") + err);
         m_cardAfterSwitch.clear();
+        m_filingAfterSwitch.reset();
         emit topicOpFinished(err);
         return;
     }
@@ -502,6 +519,7 @@ void Backend::applyTopicSwitch() {
     setStatus(QStringLiteral("synced"));
     emit currentTopicChanged();
     emit textReloaded(content);
+    finishPendingFiling();
     // Pull-then-push for the topic just switched into, same as opening the
     // app fresh — it may have changes waiting from another machine.
     triggerSync();
@@ -694,7 +712,7 @@ QString Backend::openCard(const QString &id) {
     return QString();
 }
 
-QString Backend::newCard(const QString &fromId, const QString &how) {
+QString Backend::newCard(const QString &fromId, const QString &how, const QString &text) {
     if (m_topicWatcher.isRunning())
         return QStringLiteral("switching topics — try again in a moment");
     QString err;
@@ -710,7 +728,7 @@ QString Backend::newCard(const QString &fromId, const QString &how) {
     else
         id = Cards::continueAfter(fromId, existing);
 
-    if (!m_store.createCard(id)) {
+    if (!m_store.createCard(id, text)) {
         // The file itself was made, only its commit collided with a
         // background sync's index lock — same transient case as
         // attemptCommit(): carry on, and let the retry commit it.
@@ -751,6 +769,172 @@ QString Backend::followLink(const QString &link) {
         return QStringLiteral("still saving — try again in a moment");
     }
     return QStringLiteral("switching");
+}
+
+// --- Inbox -------------------------------------------------------------
+
+void Backend::refreshInboxCount() {
+    const int count = m_store.inboxItems().size();
+    if (count == m_inboxCount)
+        return;
+    m_inboxCount = count;
+    emit inboxChanged();
+}
+
+void Backend::onCaptureConnection() {
+    while (QLocalSocket *sock = m_captureServer.nextPendingConnection()) {
+        connect(sock, &QLocalSocket::disconnected, sock, &QObject::deleteLater);
+        connect(sock, &QLocalSocket::readyRead, this, [this, sock] {
+            // One JSON object per line; buffered until the line is whole.
+            QByteArray buf = sock->property("buf").toByteArray() + sock->readAll();
+            int nl;
+            while ((nl = buf.indexOf('\n')) >= 0) {
+                const QJsonObject request = QJsonDocument::fromJson(buf.left(nl)).object();
+                buf.remove(0, nl + 1);
+                sock->write(QJsonDocument(handleCaptureRequest(request)).toJson(QJsonDocument::Compact) + '\n');
+                sock->flush();
+            }
+            sock->setProperty("buf", buf);
+        });
+    }
+}
+
+QJsonObject Backend::handleCaptureRequest(const QJsonObject &request) {
+    const QString cmd = request.value(QStringLiteral("cmd")).toString();
+    if (cmd == QStringLiteral("ping"))
+        return Capture::captureReply(true, QString(), m_inboxCount);
+    if (cmd != QStringLiteral("capture"))
+        return Capture::captureReply(false, QStringLiteral("unknown command: ") + cmd, m_inboxCount);
+
+    const QString text = GitStore::formatCapture(request.value(QStringLiteral("text")).toString(),
+                                                 request.value(QStringLiteral("title")).toString(),
+                                                 request.value(QStringLiteral("url")).toString());
+    if (m_store.addInboxItem(text).isEmpty())
+        return Capture::captureReply(false, m_store.errorString(), m_inboxCount);
+    refreshInboxCount();
+    emit notice(QStringLiteral("captured to inbox (") + QString::number(m_inboxCount) + QLatin1Char(')'));
+    triggerSync(); // a no-op mid-edit; the next sync carries it otherwise
+    return Capture::captureReply(true, QString(), m_inboxCount);
+}
+
+QVariantList Backend::inboxList() const {
+    QVariantList out;
+    for (const GitStore::InboxItem &item : m_store.inboxItems()) {
+        QString title, snippet, url;
+        for (const QString &line : item.text.split(QLatin1Char('\n'))) {
+            const QString t = line.trimmed();
+            if (t.startsWith(QStringLiteral("— ")) && title.isEmpty())
+                title = t.mid(2);
+            else if (t.startsWith(QStringLiteral("> ")) && snippet.isEmpty())
+                snippet = t.mid(2);
+            else if (t.startsWith(QStringLiteral("http")) && url.isEmpty())
+                url = t.section(QLatin1Char(' '), 0, 0);
+        }
+        QVariantMap m;
+        m[QStringLiteral("name")] = item.name;
+        m[QStringLiteral("time")] = item.time.toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+        m[QStringLiteral("title")] = title.isEmpty() ? (url.isEmpty() ? firstLine(item.text) : url) : title;
+        m[QStringLiteral("snippet")] = snippet.isEmpty() ? url : snippet;
+        m[QStringLiteral("text")] = item.text;
+        out.append(m);
+    }
+    return out;
+}
+
+QString Backend::discardInboxItem(const QString &name) {
+    if (!m_store.removeInboxItem(name))
+        return QStringLiteral("couldn't remove it: ") + m_store.errorString();
+    refreshInboxCount();
+    return QString();
+}
+
+QString Backend::fileInboxItem(const QString &name, const QString &topic,
+                               const QString &fromId, const QString &how) {
+    QString text;
+    for (const GitStore::InboxItem &item : m_store.inboxItems()) {
+        if (item.name == name)
+            text = item.text;
+    }
+    if (text.isEmpty())
+        return QStringLiteral("that capture is no longer in the inbox");
+
+    if (topic.isEmpty() || topic == m_store.currentTopic()) {
+        const QString err = newCard(fromId, how, text);
+        if (!err.isEmpty())
+            return err;
+        // The card exists now; failing to drop the inbox copy only leaves
+        // a duplicate to discard, never a lost capture.
+        if (!m_store.removeInboxItem(name))
+            m_store.logError(QStringLiteral("inbox: filed ") + name + QStringLiteral(" but couldn't remove it: ") + m_store.errorString());
+        refreshInboxCount();
+        return QString();
+    }
+
+    if (m_topicWatcher.isRunning())
+        return QStringLiteral("switching topics — try again in a moment");
+    const QString branch = topicBranch(topic);
+    if (!m_store.topicBranches().contains(branch))
+        return QStringLiteral("no topic named ") + topic;
+    m_filingAfterSwitch = PendingFiling{name, fromId, how, text};
+    requestTopicSwitch(branch);
+    if (!m_topicWatcher.isRunning()) {
+        m_filingAfterSwitch.reset();
+        return QStringLiteral("still saving — try again in a moment");
+    }
+    return QStringLiteral("switching");
+}
+
+void Backend::finishPendingFiling() {
+    if (!m_filingAfterSwitch)
+        return;
+    const PendingFiling f = *m_filingAfterSwitch;
+    m_filingAfterSwitch.reset();
+    const QString err = newCard(f.fromId, f.how, f.text);
+    if (!err.isEmpty()) {
+        emit notice(QStringLiteral("couldn't file it: ") + err);
+        return;
+    }
+    if (!m_store.removeInboxItem(f.name))
+        m_store.logError(QStringLiteral("inbox: filed ") + f.name + QStringLiteral(" but couldn't remove it: ") + m_store.errorString());
+    refreshInboxCount();
+}
+
+QString Backend::predictNewCard(const QString &topic, const QString &fromId, const QString &how) const {
+    const QStringList existing = (topic.isEmpty() || topic == m_store.currentTopic())
+        ? m_store.cardIds() : m_store.cardIdsOn(topicBranch(topic));
+    if (fromId.isEmpty())
+        return Cards::nextTopLevel(existing);
+    return how == QStringLiteral("branch") ? Cards::branchFrom(fromId, existing) : Cards::continueAfter(fromId, existing);
+}
+
+QVariantList Backend::cardListFor(const QString &topic) const {
+    if (topic == m_store.currentTopic())
+        return cardList();
+    const QString branch = topicBranch(topic);
+    if (!m_store.topicBranches().contains(branch))
+        return {};
+    QVariantList out;
+    QVariantMap note;
+    note[QStringLiteral("id")] = QString();
+    note[QStringLiteral("topic")] = topic;
+    note[QStringLiteral("title")] = firstLine(m_store.readDocumentOn(branch, QString()));
+    note[QStringLiteral("time")] = QString();
+    note[QStringLiteral("depth")] = 0;
+    note[QStringLiteral("current")] = false;
+    note[QStringLiteral("other")] = true;
+    out.append(note);
+    for (const QString &id : m_store.cardIdsOn(branch)) {
+        QVariantMap m;
+        m[QStringLiteral("id")] = id;
+        m[QStringLiteral("topic")] = topic;
+        m[QStringLiteral("title")] = firstLine(m_store.readDocumentOn(branch, id));
+        m[QStringLiteral("time")] = QString();
+        m[QStringLiteral("depth")] = Cards::depth(id);
+        m[QStringLiteral("current")] = false;
+        m[QStringLiteral("other")] = true;
+        out.append(m);
+    }
+    return out;
 }
 
 void Backend::copyToClipboard(const QString &text) const {

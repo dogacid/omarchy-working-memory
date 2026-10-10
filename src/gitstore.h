@@ -7,6 +7,7 @@
 #include <QList>
 #include <QMutex>
 #include <atomic>
+#include <functional>
 #include <memory>
 
 class QLockFile;
@@ -37,6 +38,13 @@ public:
         QString branch; // "main" or "topic/<slug>"
         QString card;   // empty for the topic note
         QString line;
+    };
+
+    // One capture waiting in the inbox (see addInboxItem()).
+    struct InboxItem {
+        QString name;    // file name under items/ — unique across machines
+        QDateTime time;  // when it was captured
+        QString text;
     };
 
     struct SyncOutcome {
@@ -95,9 +103,16 @@ public:
     // cards/ — far cheaper than one call per card. A card that was never
     // committed falls back to its file's mtime.
     QHash<QString, QDateTime> cardCreatedTimes() const;
-    // Writes an empty cards/<id>.txt and commits it. Fails rather than
-    // overwriting if the card already exists.
-    bool createCard(const QString &id);
+    // Writes cards/<id>.txt (empty, or holding text) and commits it. Fails
+    // rather than overwriting if the card already exists.
+    bool createCard(const QString &id, const QString &text = QString());
+
+    // A browser capture as the plain text an inbox item holds:
+    //   > the selected text, quoted line by line
+    //   — Page title
+    //     https://url   [2026-10-10 14:32]
+    // Any part may be missing (a whole-page capture has no quote).
+    static QString formatCapture(const QString &text, const QString &title, const QString &url);
 
     // Full-text search of every topic's note and cards at once, via a
     // single `git grep`: the current topic from its working tree (so saved
@@ -112,6 +127,23 @@ public:
     // (no conflict markers) — the same rule the note's own merge driver
     // uses during a pull.
     QString mergeText(const QString &base, const QString &ours, const QString &theirs, bool *ok) const;
+    // --- Inbox: captures (from the browser extension, via the native host
+    // or the running app) waiting to be filed into the slip box. They live
+    // on their own branch, "inbox", one file per capture named by time and
+    // machine, so two machines' captures never collide when they sync.
+    // Written with git plumbing against a throwaway index — never checked
+    // out — so capturing never touches the working tree or the editor.
+    //
+    // Adds text as a new item; returns its name, or empty with
+    // errorString() set.
+    QString addInboxItem(const QString &text);
+    // Oldest first: the order they're meant to be worked through.
+    QList<InboxItem> inboxItems() const;
+    bool removeInboxItem(const QString &name);
+    // Card IDs on any topic's branch, in slip-box order, without checking
+    // it out (for placing a card in a topic you're not in).
+    QStringList cardIdsOn(const QString &branch) const;
+
     // A document's text on another topic's branch (card empty = its note),
     // without checking that branch out.
     QString readDocumentOn(const QString &branch, const QString &card) const;
@@ -186,6 +218,20 @@ private:
     bool commitWithMessage(const QString &message, bool *committed);
     bool git(const QStringList &args, bool network = false) const;
     QString gitOutput(const QStringList &args, bool *ok, bool network = false) const;
+    // The general form of the two above: feeds input on stdin and adds
+    // env to the environment (e.g. GIT_INDEX_FILE for plumbing).
+    QString gitRun(const QStringList &args, bool *ok, const QByteArray &input = QByteArray(),
+                   const QStringList &env = {}, bool network = false) const;
+    // Commits a change to `branch` without checking it out: edit() is
+    // handed the GIT_INDEX_FILE env of a throwaway index preloaded with
+    // the branch's tree (empty if the branch doesn't exist yet), stages
+    // whatever it likes there, and returns false to abort. The ref only
+    // moves if nobody else moved it meanwhile.
+    bool commitToBranch(const QString &branch, const QString &message,
+                        const std::function<bool(const QStringList &env)> &edit);
+    // Brings the local inbox branch and origin's together (fast-forward,
+    // or a worktree-free merge) and pushes. Called from syncWithRemote().
+    void syncInbox();
     void ensureIdentity();
     // Normalizes onto a single, fixed branch name regardless of this
     // machine's `init.defaultBranch` — otherwise two machines with

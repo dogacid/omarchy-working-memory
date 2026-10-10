@@ -7,8 +7,23 @@
 #include <cstdio>
 
 #include "backend.h"
+#include "capture.h"
+
+#include <QCoreApplication>
+#include <cstring>
 
 int main(int argc, char *argv[]) {
+    // Started by the browser for the capture extension (see capture.h):
+    // no window, no GUI at all — just JSON over stdin/stdout. Chromium also
+    // passes the calling extension's origin as an argument, ignored here
+    // (the host manifest's allowed_origins already restricts who can call).
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--native-host") == 0) {
+            QCoreApplication app(argc, argv);
+            return Capture::runNativeHost();
+        }
+    }
+
     QGuiApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("omarchy-working-memory"));
     // Matches the class the Hyprland window rule (hypr/working-memory.lua)

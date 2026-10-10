@@ -10,6 +10,9 @@
 #     - adds the bar-widget to the bar layout via `omarchy bar put`
 #   - sway, if ~/.config/sway exists: symlinks sway/working-memory.conf into
 #     ~/.config/sway/config.d/ (which archsway's sway config includes)
+#   - registers the browser capture extension's native messaging host with
+#     each Chromium-family browser that has a config dir (Chromium, Chrome,
+#     Brave); the extension itself is loaded by hand, see the README
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,6 +31,25 @@ echo "Building omarchy-working-memory..."
 # without rerunning this installer, same as the toggle script.
 ln -sfn "$REPO_DIR/build/omarchy-working-memory" "$LOCAL_BIN/omarchy-working-memory"
 ln -sfn "$REPO_DIR/bin/omarchy-working-memory-toggle" "$LOCAL_BIN/omarchy-working-memory-toggle"
+ln -sfn "$REPO_DIR/bin/omarchy-working-memory-native-host" "$LOCAL_BIN/omarchy-working-memory-native-host"
+
+# The extension's ID is fixed by the "key" in extension/manifest.json, so
+# the host can be restricted to exactly that extension.
+EXTENSION_ID="mdmpmonhmledmdbohocaafjmjaanpjbn"
+for browser_dir in "$HOME/.config/chromium" "$HOME/.config/google-chrome" "$HOME/.config/BraveSoftware/Brave-Browser"; do
+  [[ -d "$browser_dir" ]] || continue
+  mkdir -p "$browser_dir/NativeMessagingHosts"
+  cat >"$browser_dir/NativeMessagingHosts/com.omarchy.working_memory.json" <<JSON
+{
+  "name": "com.omarchy.working_memory",
+  "description": "omarchy-working-memory browser capture",
+  "path": "$LOCAL_BIN/omarchy-working-memory-native-host",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://$EXTENSION_ID/"]
+}
+JSON
+  echo "Registered the capture host with ${browser_dir#"$HOME/"}"
+done
 
 if [[ -f "$HYPRLAND_LUA" ]]; then
   echo "Linking Quickshell plugin..."
@@ -73,4 +95,6 @@ if [[ ! -f "$HYPRLAND_LUA" && ! -d "$SWAY_DIR" ]]; then
   echo "only the binary and toggle script were installed." >&2
 fi
 
+echo "Browser capture: load $REPO_DIR/extension as an unpacked extension"
+echo "(chrome://extensions, Developer mode on, Load unpacked) — once."
 echo "Done. Press Super+N (or click the bar icon on Omarchy) to open the working-memory scratchpad."

@@ -87,6 +87,16 @@ ApplicationWindow {
     // the result list and the preview.
     property var searchWords: []
 
+    // --- Inbox (Ctrl+B): browser captures waiting to be filed — see
+    // backend.inboxList()/fileInboxItem(). Filing reuses the card picker
+    // to choose the place: filingItem is the capture being placed while
+    // the picker is open for it, null otherwise.
+    property var inboxEntries: []
+    property var selectedInbox: null
+    property var filingItem: null
+    property var filePrediction: ({ after: "", branch: "" })
+    property bool pendingInboxD: false
+
     onClosing: backend.save()
 
     function openHistory() {
@@ -123,6 +133,7 @@ ApplicationWindow {
     }
 
     function backToEdit() {
+        win.filingItem = null;
         mode = "edit";
         editor.forceActiveFocus();
     }
@@ -350,6 +361,52 @@ ApplicationWindow {
         flashTimer.restart();
     }
 
+    // --- Inbox ---------------------------------------------------------
+    function openInbox(keepIndex) {
+        win.inboxEntries = backend.inboxList();
+        win.pendingInboxD = false;
+        mode = "inbox";
+        const i = keepIndex === undefined ? 0 : Math.min(keepIndex, win.inboxEntries.length - 1);
+        inboxListView.currentIndex = win.inboxEntries.length > 0 ? Math.max(0, i) : -1;
+        win.showSelectedInbox();
+        inboxListView.forceActiveFocus();
+    }
+    function showSelectedInbox() {
+        const i = inboxListView.currentIndex;
+        win.selectedInbox = i >= 0 && i < win.inboxEntries.length ? win.inboxEntries[i] : null;
+    }
+    function discardSelectedInbox() {
+        if (!win.selectedInbox) return;
+        const err = backend.discardInboxItem(win.selectedInbox.name);
+        if (err) { win.flash(err); return; }
+        win.flash("discarded");
+        win.openInbox(inboxListView.currentIndex);
+    }
+    // Enter on a capture: pick its place with the card picker, which then
+    // reads Enter/c as "after this card" and b as "branch off it".
+    function startFiling() {
+        if (!win.selectedInbox) return;
+        const item = win.selectedInbox;
+        win.openCardPicker();
+        win.filingItem = item;
+        win.showSelectedCard(); // refresh the header with the predictions
+    }
+    function fileSelected(how) {
+        const c = win.selectedCard;
+        if (!c || !win.filingItem || win.topicBusy) return;
+        win.pushJump();
+        const err = backend.fileInboxItem(win.filingItem.name, c.topic, c.id, how);
+        if (err === "switching") { win.topicBusy = true; win.backToEdit(); return; }
+        if (err) { win.jumpStack = win.jumpStack.slice(0, -1); win.flash(err); return; }
+        win.backToEdit();
+    }
+    // Esc from the picker while filing goes back to the inbox, not the
+    // editor — one step back, the way Esc works everywhere else here.
+    function escapeFromMode() {
+        if (win.mode === "cards" && win.filingItem) { win.filingItem = null; win.openInbox(); return; }
+        win.backToEdit();
+    }
+
     function openCardPicker() {
         win.cardEntries = backend.cardList();
         win.filteredCards = win.cardEntries;
@@ -370,9 +427,18 @@ ApplicationWindow {
     // (searchTimer), since each search shells out to git.
     function filterCards(query) {
         const q = query.trim().toLowerCase();
+        const browse = q.match(/^([^\s:]+):\s*(.*)$/);
         if (!q) {
             win.searchWords = [];
             win.filteredCards = win.cardEntries;
+        } else if (browse) {
+            // "garden:" lists that topic's cards (to place or open something
+            // in a topic you're not in); words after it filter them.
+            const rest = browse[2];
+            win.searchWords = rest ? rest.split(/\s+/) : [];
+            win.filteredCards = backend.cardListFor(browse[1]).filter(function (c) {
+                return !rest || c.id.indexOf(rest) === 0 || c.title.toLowerCase().indexOf(rest) !== -1;
+            });
         } else {
             win.searchWords = q.split(/\s+/);
             const byNumber = win.cardEntries.filter(function (c) { return c.id !== "" && c.id.indexOf(q) === 0; });
@@ -389,6 +455,9 @@ ApplicationWindow {
         const c = cardListView.currentIndex >= 0 ? win.filteredCards[cardListView.currentIndex] : null;
         win.selectedCard = c;
         win.cardPreview = c ? backend.cardContent(c.id, c.topic) : "";
+        if (c && win.filingItem)
+            win.filePrediction = { after: backend.predictNewCard(c.topic, c.id, "continue"),
+                                   branch: backend.predictNewCard(c.topic, c.id, "branch") };
         cardPreviewArea.deselect();
         cardPreviewArea.cursorPosition = 0;
         // Scroll the preview to the first hit and select it, so the match
@@ -427,6 +496,7 @@ ApplicationWindow {
     }
     function pickerOpenSelected() {
         if (!win.selectedCard) return;
+        if (win.filingItem) { win.fileSelected("continue"); return; }
         const c = win.selectedCard;
         // A search hit from another topic: switch topic in the background
         // (like following a link), straight to the card or the note.
@@ -592,7 +662,13 @@ ApplicationWindow {
     // Disabled while visual-selecting: Esc there means "cancel the
     // selection" (handled in previewArea's own Keys.onPressed below), not
     // "leave history" — a second Esc after that falls through to this one.
-    Shortcut { sequence: "Escape"; enabled: win.mode !== "edit" && win.previewSelMode === "none"; onActivated: win.backToEdit() }
+    Shortcut { sequence: "Escape"; enabled: win.mode !== "edit" && win.previewSelMode === "none"; onActivated: win.escapeFromMode() }
+    Shortcut {
+        sequence: "Ctrl+B"
+        enabled: (win.mode === "edit" || win.mode === "inbox") && !win.showHelp && !win.showTopicSwitcher
+                 && !win.showTopicCreator && !win.topicBusy && !backend.syncLocked && backend.lastError === ""
+        onActivated: win.mode === "edit" ? win.openInbox() : win.backToEdit()
+    }
     // Esc from Insert mode enters vim Normal mode. Once editorMode has left
     // "insert", the editor's own Keys.onPressed (below) handles Esc itself
     // (cancel visual / already-normal no-op) — this Shortcut is disabled at
@@ -608,6 +684,7 @@ ApplicationWindow {
 
     Connections {
         target: backend
+        function onNotice(message) { win.flash(message); }
         function onTopicOpFinished(error) {
             win.topicBusy = false;
             if (error) {
@@ -1019,6 +1096,113 @@ ApplicationWindow {
             }
         }
 
+        // --- Inbox: captures on the left (oldest first — the order to work
+        // through them), the whole capture on the right.
+        RowLayout {
+            visible: win.mode === "inbox"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 0
+
+            ColumnLayout {
+                Layout.preferredWidth: 320
+                Layout.minimumWidth: 320
+                Layout.maximumWidth: 320
+                Layout.fillHeight: true
+                spacing: 0
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 36
+                    color: backend.themeSelection
+                    Text {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Inbox · " + win.inboxEntries.length + (win.inboxEntries.length === 1 ? " capture" : " captures")
+                        color: backend.themeForeground
+                        font.bold: true
+                    }
+                }
+
+                Text {
+                    visible: win.inboxEntries.length === 0
+                    Layout.fillWidth: true
+                    Layout.margins: 16
+                    wrapMode: Text.Wrap
+                    color: backend.themeMuted
+                    text: "Nothing waiting. Captures from the browser extension land here, to be filed into the slip box."
+                }
+
+                ListView {
+                    id: inboxListView
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    model: win.inboxEntries
+                    clip: true
+                    keyNavigationEnabled: true
+                    highlightMoveDuration: 60
+                    onCurrentIndexChanged: win.showSelectedInbox()
+
+                    Keys.onPressed: function (event) {
+                        if (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) return;
+                        const hadD = win.pendingInboxD;
+                        win.pendingInboxD = false;
+                        let handled = true;
+                        if (event.text === "j") inboxListView.currentIndex = Math.min(inboxListView.currentIndex + 1, inboxListView.count - 1);
+                        else if (event.text === "k") inboxListView.currentIndex = Math.max(inboxListView.currentIndex - 1, 0);
+                        else if (event.text === "d") { if (hadD) win.discardSelectedInbox(); else win.pendingInboxD = true; }
+                        else if (event.text === "y") { if (win.selectedInbox) { backend.copyToClipboard(win.selectedInbox.text); win.flash("copied"); } }
+                        else if (event.text === "f" || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) win.startFiling();
+                        else handled = false;
+                        if (handled) event.accepted = true;
+                    }
+
+                    delegate: ItemDelegate {
+                        width: inboxListView.width
+                        highlighted: ListView.isCurrentItem
+                        onClicked: inboxListView.currentIndex = index
+                        onDoubleClicked: { inboxListView.currentIndex = index; win.startFiling(); }
+                        // Same reason as the card picker's rows: the
+                        // focused row would swallow Return otherwise.
+                        Keys.onReturnPressed: win.startFiling()
+                        Keys.onEnterPressed: win.startFiling()
+                        background: Rectangle { color: highlighted ? backend.themeSelection : "transparent" }
+                        contentItem: Column {
+                            width: inboxListView.width - 24
+                            spacing: 2
+                            Text { text: modelData.time; color: backend.themeMuted; font.pixelSize: 11 }
+                            Text { text: modelData.title; color: backend.themeForeground; font.bold: true; elide: Text.ElideRight; width: parent.width }
+                            Text { text: modelData.snippet; color: backend.themeMuted; elide: Text.ElideRight; width: parent.width; visible: text !== "" }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { Layout.fillHeight: true; width: 1; color: backend.themeMuted; opacity: 0.3 }
+
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                TextArea {
+                    readOnly: true
+                    selectByMouse: true
+                    wrapMode: TextArea.Wrap
+                    text: win.selectedInbox ? win.selectedInbox.text : ""
+                    font.family: "monospace"
+                    font.pixelSize: 15
+                    color: backend.themeForeground
+                    selectionColor: backend.themeSelection
+                    selectedTextColor: backend.themeForeground
+                    background: Rectangle { color: Qt.darker(backend.themeBackground, 1.08) }
+                    topPadding: 12
+                    leftPadding: 16
+                    rightPadding: 16
+                    bottomPadding: 12
+                }
+            }
+        }
+
         // --- Index cards: the same list-beside-preview layout as history,
         // the list in slip-box order and indented by branch depth so the
         // shape of each line of thought shows at a glance.
@@ -1068,6 +1252,13 @@ ApplicationWindow {
                     Keys.onPressed: function (event) {
                         if (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) return;
                         let handled = true;
+                        if (win.filingItem) {
+                            // Placing a capture: Enter/c and b pick the spot;
+                            // the link keys don't apply.
+                            if (event.text === "c" || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { win.fileSelected("continue"); event.accepted = true; return; }
+                            if (event.text === "b") { win.fileSelected("branch"); event.accepted = true; return; }
+                            if (event.text === "l" || event.text === "y") { event.accepted = true; return; }
+                        }
                         if (event.text === "j") cardListView.currentIndex = Math.min(cardListView.currentIndex + 1, cardListView.count - 1);
                         else if (event.text === "k") cardListView.currentIndex = Math.max(cardListView.currentIndex - 1, 0);
                         else if (event.text === "g") cardListView.currentIndex = 0;
@@ -1159,6 +1350,11 @@ ApplicationWindow {
                         font.bold: true
                         elide: Text.ElideRight
                         text: !win.selectedCard ? ""
+                            : win.filingItem
+                              ? (win.selectedCard.id === ""
+                                 ? "File as new card " + win.filePrediction.after + " in " + win.selectedCard.topic
+                                 : "File in " + win.selectedCard.topic + ":  enter → " + win.filePrediction.after
+                                   + " (after " + win.selectedCard.id + ")   ·   b → " + win.filePrediction.branch + " (branch)")
                             : win.selectedCard.id === "" ? win.selectedCard.topic + " — topic note"
                             : "Card " + win.selectedCard.id
                               + (win.selectedCard.other ? "  ·  in " + win.selectedCard.topic
@@ -1222,6 +1418,11 @@ ApplicationWindow {
                             const pending = win.pendingD ? "  d" : win.pendingG ? "  g" : "";
                             return "-- " + label + " --" + pending + "   ?  help";
                         }
+                        if (win.mode === "inbox")
+                            return win.pendingInboxD ? "d again to discard this capture · any other key cancels"
+                                : "j/k move · enter file it · dd discard · y copy · esc back";
+                        if (win.mode === "cards" && win.filingItem)
+                            return "placing “" + win.filingItem.title + "” · enter after · b branch · topic: lists a topic · / search · esc back to inbox";
                         if (win.mode === "cards")
                             return "j/k move · enter open · l link here · y copy link · c new after · b branch · / search all topics · esc back";
                         if (win.previewSelMode !== "none")
@@ -1234,7 +1435,8 @@ ApplicationWindow {
                     color: backend.themeAccent
                     font.pixelSize: 12
                     text: win.flashMessage ? win.flashMessage
-                        : win.mode === "edit" ? (backend.currentCard ? "card " + backend.currentCard + " · " : "") + backend.status
+                        : win.mode === "edit" ? (backend.inboxCount > 0 ? "inbox " + backend.inboxCount + " · " : "")
+                                                + (backend.currentCard ? "card " + backend.currentCard + " · " : "") + backend.status
                         : ""
                 }
             }
@@ -1346,6 +1548,7 @@ ApplicationWindow {
                                 { key: "Ctrl+I", desc: "Index cards in this topic (l there links one here)" },
                                 { key: "Ctrl+Shift+I", desc: "New card after the open one (Luhmann numbering)" },
                                 { key: "Ctrl+O", desc: "Jump back to where a link or card took you from" },
+                                { key: "Ctrl+B", desc: "Inbox: browser captures waiting to be filed" },
                                 { key: "Esc", desc: "Enter vim Normal mode" }
                             ]},
                             { title: "Normal mode", items: [

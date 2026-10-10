@@ -1,5 +1,6 @@
 #include "gitstore.h"
 
+#include "capture.h"
 #include "cards.h"
 
 #include <QDir>
@@ -12,6 +13,7 @@
 #include <QSet>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QSysInfo>
 #include <QTemporaryDir>
 #include <QTextStream>
 
@@ -23,6 +25,9 @@ constexpr auto kErrorLogName = "error.log";
 constexpr auto kFieldSep = "\x1f"; // unit separator: won't collide with real message text
 constexpr auto kBranch = "main";
 constexpr auto kCardsDir = "cards";
+constexpr auto kInboxBranch = "inbox";
+constexpr auto kInboxDir = "items";
+constexpr auto kInboxTimeFormat = "yyyyMMdd-HHmmss-zzz";
 }
 
 GitStore::GitStore(QObject *parent) : QObject(parent) {}
@@ -30,15 +35,7 @@ GitStore::GitStore(QObject *parent) : QObject(parent) {}
 GitStore::~GitStore() = default;
 
 bool GitStore::open() {
-    const QString override = qEnvironmentVariable("OMARCHY_WORKING_MEMORY_DIR");
-    if (!override.isEmpty()) {
-        m_dir = override;
-    } else {
-        QString base = qEnvironmentVariable("XDG_DATA_HOME");
-        if (base.isEmpty())
-            base = QDir::homePath() + QStringLiteral("/.local/share");
-        m_dir = base + QStringLiteral("/omarchy-working-memory");
-    }
+    m_dir = Capture::dataDir();
     m_activeRel = QLatin1String(kFileName);
     m_path = notePath();
 
@@ -432,6 +429,187 @@ QString GitStore::mergeText(const QString &base, const QString &ours, const QStr
     return out;
 }
 
+bool GitStore::commitToBranch(const QString &branch, const QString &message,
+                              const std::function<bool(const QStringList &env)> &edit) {
+    const QString ref = QStringLiteral("refs/heads/") + branch;
+    bool ok = false;
+    const QString parent = gitOutput({QStringLiteral("rev-parse"), QStringLiteral("--verify"), QStringLiteral("-q"), ref}, &ok).trimmed();
+    const bool exists = ok && !parent.isEmpty();
+
+    QTemporaryDir tmp;
+    if (!tmp.isValid()) {
+        setError(QStringLiteral("no temp dir for ") + branch);
+        return false;
+    }
+    const QStringList env{QStringLiteral("GIT_INDEX_FILE=") + tmp.filePath(QStringLiteral("index"))};
+    gitRun(exists ? QStringList{QStringLiteral("read-tree"), parent} : QStringList{QStringLiteral("read-tree"), QStringLiteral("--empty")},
+           &ok, QByteArray(), env);
+    if (!ok || !edit(env))
+        return false;
+
+    const QString tree = gitRun({QStringLiteral("write-tree")}, &ok, QByteArray(), env).trimmed();
+    if (!ok)
+        return false;
+    QStringList commitArgs{QStringLiteral("commit-tree"), tree, QStringLiteral("-m"), message};
+    if (exists)
+        commitArgs << QStringLiteral("-p") << parent;
+    const QString commit = gitOutput(commitArgs, &ok).trimmed();
+    if (!ok)
+        return false;
+    // Compare-and-swap: an empty old value means "must not exist yet". If
+    // a sync moved the branch in between, this fails and the caller retries
+    // against the new tip.
+    return git({QStringLiteral("update-ref"), QStringLiteral("-m"), message, ref, commit, exists ? parent : QString()});
+}
+
+QString GitStore::addInboxItem(const QString &text) {
+    QString host;
+    for (const QChar &c : QSysInfo::machineHostName().toLower()) {
+        if (c.isLetterOrNumber())
+            host += c;
+    }
+    const QString name = QDateTime::currentDateTime().toString(QLatin1String(kInboxTimeFormat))
+        + QLatin1Char('-') + (host.isEmpty() ? QStringLiteral("host") : host) + QStringLiteral(".txt");
+
+    bool ok = false;
+    const QString blob = gitRun({QStringLiteral("hash-object"), QStringLiteral("-w"), QStringLiteral("--stdin")}, &ok, text.toUtf8()).trimmed();
+    if (!ok)
+        return QString();
+    const QString path = QLatin1String(kInboxDir) + QLatin1Char('/') + name;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const bool done = commitToBranch(QLatin1String(kInboxBranch), QStringLiteral("Capture: ") + previewLine(text),
+            [&](const QStringList &env) {
+                bool staged = false;
+                gitRun({QStringLiteral("update-index"), QStringLiteral("--add"), QStringLiteral("--cacheinfo"),
+                        QStringLiteral("100644,") + blob + QLatin1Char(',') + path}, &staged, QByteArray(), env);
+                return staged;
+            });
+        if (done)
+            return name;
+    }
+    return QString();
+}
+
+bool GitStore::removeInboxItem(const QString &name) {
+    const QString path = QLatin1String(kInboxDir) + QLatin1Char('/') + name;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const bool done = commitToBranch(QLatin1String(kInboxBranch), QStringLiteral("Filed: ") + name,
+            [&](const QStringList &env) {
+                bool staged = false;
+                gitRun({QStringLiteral("update-index"), QStringLiteral("--force-remove"), path}, &staged, QByteArray(), env);
+                return staged;
+            });
+        if (done)
+            return true;
+    }
+    return false;
+}
+
+QList<GitStore::InboxItem> GitStore::inboxItems() const {
+    QList<InboxItem> items;
+    bool ok = false;
+    const QString ref = QStringLiteral("refs/heads/") + QLatin1String(kInboxBranch);
+    const QString listing = gitOutput({QStringLiteral("ls-tree"), QStringLiteral("--name-only"), ref,
+                                       QLatin1String(kInboxDir) + QLatin1Char('/')}, &ok);
+    if (!ok)
+        return items; // no inbox branch yet: an empty inbox
+    QStringList paths = listing.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    paths.sort(); // names start with the capture time
+    if (paths.isEmpty())
+        return items;
+
+    // One `git cat-file --batch` for every item, not a process per item.
+    QByteArray request;
+    for (const QString &p : paths)
+        request += (ref + QLatin1Char(':') + p + QLatin1Char('\n')).toUtf8();
+    QProcess proc;
+    proc.setWorkingDirectory(m_dir);
+    proc.start(QStringLiteral("git"), {QStringLiteral("cat-file"), QStringLiteral("--batch")});
+    proc.write(request);
+    proc.closeWriteChannel();
+    if (!proc.waitForFinished(10000))
+        return items;
+    const QByteArray out = proc.readAllStandardOutput();
+
+    int pos = 0;
+    for (const QString &p : paths) {
+        const int nl = out.indexOf('\n', pos);
+        if (nl < 0)
+            break;
+        const QList<QByteArray> header = out.mid(pos, nl - pos).split(' ');
+        pos = nl + 1;
+        if (header.size() < 3)
+            continue; // "<path> missing"
+        const int size = header.at(2).toInt();
+        const QString name = QFileInfo(p).fileName();
+        items.append({name,
+                      QDateTime::fromString(name.left(QString::fromLatin1(kInboxTimeFormat).size()), QLatin1String(kInboxTimeFormat)),
+                      QString::fromUtf8(out.mid(pos, size))});
+        pos += size + 1; // content, then its trailing newline
+    }
+    return items;
+}
+
+QStringList GitStore::cardIdsOn(const QString &branch) const {
+    const QString ref = localBranchExists(branch) ? branch : QStringLiteral("origin/") + branch;
+    bool ok = false;
+    const QString listing = gitOutput({QStringLiteral("ls-tree"), QStringLiteral("--name-only"), ref,
+                                       QLatin1String(kCardsDir) + QLatin1Char('/')}, &ok);
+    QStringList ids;
+    for (const QString &p : listing.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+        QString card;
+        if (documentCard(p, &card) && !card.isEmpty())
+            ids.append(card);
+    }
+    std::sort(ids.begin(), ids.end(), Cards::lessThan);
+    return ids;
+}
+
+void GitStore::syncInbox() {
+    if (syncCancelled())
+        return;
+    const QString localRef = QStringLiteral("refs/heads/") + QLatin1String(kInboxBranch);
+    const QString remoteRef = QStringLiteral("refs/remotes/origin/") + QLatin1String(kInboxBranch);
+    bool ok = false;
+    const QString local = gitOutput({QStringLiteral("rev-parse"), QStringLiteral("--verify"), QStringLiteral("-q"), localRef}, &ok).trimmed();
+    const QString remote = gitOutput({QStringLiteral("rev-parse"), QStringLiteral("--verify"), QStringLiteral("-q"), remoteRef}, &ok).trimmed();
+    if (local == remote)
+        return; // in step, or no inbox anywhere yet
+
+    auto push = [&] {
+        if (!syncCancelled())
+            git({QStringLiteral("push"), QStringLiteral("origin"), QLatin1String(kInboxBranch)}, /*network=*/true);
+    };
+    auto isAncestor = [&](const QString &a, const QString &b) {
+        return git({QStringLiteral("merge-base"), QStringLiteral("--is-ancestor"), a, b});
+    };
+
+    if (remote.isEmpty()) {
+        push(); // only this machine has an inbox so far
+    } else if (local.isEmpty()) {
+        git({QStringLiteral("update-ref"), localRef, remote, QString()});
+    } else if (isAncestor(local, remote)) {
+        git({QStringLiteral("update-ref"), localRef, remote, local});
+    } else if (isAncestor(remote, local)) {
+        push();
+    } else {
+        // Both machines captured since they last agreed. Items are separate
+        // files with machine-unique names, so this merge is always clean;
+        // merge-tree does it without a working tree. If it somehow isn't,
+        // leave both sides alone for a human rather than guess.
+        const QString tree = gitOutput({QStringLiteral("merge-tree"), QStringLiteral("--write-tree"), local, remote}, &ok)
+                                 .section(QLatin1Char('\n'), 0, 0).trimmed();
+        if (!ok) {
+            logError(QStringLiteral("inbox: couldn't merge the two machines' inboxes: ") + errorString());
+            return;
+        }
+        const QString commit = gitOutput({QStringLiteral("commit-tree"), tree, QStringLiteral("-p"), local,
+                                          QStringLiteral("-p"), remote, QStringLiteral("-m"), QStringLiteral("Merge inbox")}, &ok).trimmed();
+        if (ok && git({QStringLiteral("update-ref"), localRef, commit, local}))
+            push();
+    }
+}
+
 QString GitStore::readDocumentOn(const QString &branch, const QString &card) const {
     const QString ref = localBranchExists(branch) ? branch : QStringLiteral("origin/") + branch;
     const QString path = card.isEmpty() ? QString(QLatin1String(kFileName)) : cardRelPath(card);
@@ -440,7 +618,20 @@ QString GitStore::readDocumentOn(const QString &branch, const QString &card) con
     return ok ? out : QString();
 }
 
-bool GitStore::createCard(const QString &id) {
+QString GitStore::formatCapture(const QString &text, const QString &title, const QString &url) {
+    QStringList lines;
+    for (const QString &line : text.trimmed().split(QLatin1Char('\n'))) {
+        if (!text.trimmed().isEmpty())
+            lines << QStringLiteral("> ") + line.trimmed();
+    }
+    if (!title.trimmed().isEmpty())
+        lines << QStringLiteral("— ") + title.simplified();
+    const QString stamp = QLatin1Char('[') + QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")) + QLatin1Char(']');
+    lines << QStringLiteral("  ") + (url.trimmed().isEmpty() ? stamp : url.trimmed() + QStringLiteral("   ") + stamp);
+    return lines.join(QLatin1Char('\n')) + QLatin1Char('\n');
+}
+
+bool GitStore::createCard(const QString &id, const QString &text) {
     if (!Cards::isValidId(id)) {
         setError(QStringLiteral("invalid card number: ") + id);
         return false;
@@ -458,6 +649,7 @@ bool GitStore::createCard(const QString &id) {
         setError(QStringLiteral("create card: ") + f.errorString());
         return false;
     }
+    f.write(text.toUtf8());
     f.close();
     return commitWithMessage(QStringLiteral("New card: ") + id, nullptr);
 }
@@ -623,6 +815,9 @@ GitStore::SyncOutcome GitStore::syncWithRemote() {
         return outcome;
     }
     emit pulled();
+    // The inbox is its own branch with its own history: sync it whether or
+    // not the current branch's push below succeeds.
+    syncInbox();
     if (!pushToRemote()) {
         outcome.error = errorString();
         return outcome;
@@ -793,39 +988,35 @@ bool GitStore::hasCommits() const {
 }
 
 bool GitStore::git(const QStringList &args, bool network) const {
-    QProcess proc;
-    proc.setWorkingDirectory(m_dir);
-    if (network) {
-        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-        env.insert(QStringLiteral("GIT_TERMINAL_PROMPT"), QStringLiteral("0"));
-        env.insert(QStringLiteral("GIT_SSH_COMMAND"), QStringLiteral("ssh -o BatchMode=yes -o ConnectTimeout=5"));
-        proc.setProcessEnvironment(env);
-    }
-    proc.start(QStringLiteral("git"), args);
-    const int timeoutMs = network ? 5000 : 10000;
-    if (!proc.waitForFinished(timeoutMs)) {
-        proc.kill();
-        proc.waitForFinished();
-        setError(QStringLiteral("git ") + args.join(QLatin1Char(' ')) + QStringLiteral(" timed out"));
-        return false;
-    }
-    if (proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0) {
-        setError(QString::fromUtf8(proc.readAllStandardError()).trimmed());
-        return false;
-    }
-    return true;
+    bool ok = false;
+    gitRun(args, &ok, QByteArray(), {}, network);
+    return ok;
 }
 
 QString GitStore::gitOutput(const QStringList &args, bool *ok, bool network) const {
+    return gitRun(args, ok, QByteArray(), {}, network);
+}
+
+QString GitStore::gitRun(const QStringList &args, bool *ok, const QByteArray &input,
+                         const QStringList &extraEnv, bool network) const {
     QProcess proc;
     proc.setWorkingDirectory(m_dir);
-    if (network) {
+    if (network || !extraEnv.isEmpty()) {
         QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-        env.insert(QStringLiteral("GIT_TERMINAL_PROMPT"), QStringLiteral("0"));
-        env.insert(QStringLiteral("GIT_SSH_COMMAND"), QStringLiteral("ssh -o BatchMode=yes -o ConnectTimeout=5"));
+        if (network) {
+            env.insert(QStringLiteral("GIT_TERMINAL_PROMPT"), QStringLiteral("0"));
+            env.insert(QStringLiteral("GIT_SSH_COMMAND"), QStringLiteral("ssh -o BatchMode=yes -o ConnectTimeout=5"));
+        }
+        for (const QString &kv : extraEnv) {
+            const int eq = kv.indexOf(QLatin1Char('='));
+            env.insert(kv.left(eq), kv.mid(eq + 1));
+        }
         proc.setProcessEnvironment(env);
     }
     proc.start(QStringLiteral("git"), args);
+    if (!input.isEmpty())
+        proc.write(input);
+    proc.closeWriteChannel();
     const int timeoutMs = network ? 5000 : 10000;
     if (!proc.waitForFinished(timeoutMs)) {
         proc.kill();

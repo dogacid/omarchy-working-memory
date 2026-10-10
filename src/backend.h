@@ -5,9 +5,13 @@
 #include <QTimer>
 #include <QFileSystemWatcher>
 #include <QFutureWatcher>
+#include <QJsonObject>
+#include <QLocalServer>
 #include <QVariantList>
 
 #include "gitstore.h"
+
+#include <optional>
 
 // Backend is the whole app's state machine, exposed to QML as a context
 // property. It owns the git-backed store, the save/commit debounce timers,
@@ -31,6 +35,8 @@ class Backend : public QObject {
     // latest text, so opening the app and typing straight away never
     // races days of changes arriving from another machine.
     Q_PROPERTY(bool syncLocked READ syncLocked NOTIFY syncLockedChanged)
+    // Captures waiting in the inbox (see GitStore's inbox), for the footer.
+    Q_PROPERTY(int inboxCount READ inboxCount NOTIFY inboxChanged)
 
 public:
     explicit Backend(QObject *parent = nullptr);
@@ -60,6 +66,7 @@ public:
     QString currentTopic() const { return m_store.currentTopic(); }
     QString currentCard() const { return m_store.activeCard(); }
     bool syncLocked() const { return m_syncLocked; }
+    int inboxCount() const { return m_inboxCount; }
 
     Q_INVOKABLE QString initialText() const;
     Q_INVOKABLE void noteEdited(const QString &text);
@@ -112,12 +119,30 @@ public:
     // after fromId (next sibling, or a branch if that number's taken),
     // "branch" always makes it a child. From the note (fromId ""), either
     // way it's the next top-level number.
-    Q_INVOKABLE QString newCard(const QString &fromId, const QString &how);
+    Q_INVOKABLE QString newCard(const QString &fromId, const QString &how, const QString &text = QString());
     // Opens the card a [[topic:id]] link points at. Within the current
     // topic that's immediate; another topic needs a branch switch first,
     // which runs in the background like Ctrl+T's — then this returns
     // "switching" and the outcome arrives via topicOpFinished().
     Q_INVOKABLE QString followLink(const QString &link);
+
+    // --- Inbox ----------------------------------------------------------
+    // {name, time, title, snippet, text} per capture, oldest first.
+    Q_INVOKABLE QVariantList inboxList() const;
+    Q_INVOKABLE QString discardInboxItem(const QString &name);
+    // Files a capture as a new card placed relative to fromId in topic
+    // (continue or branch, as newCard()), removes it from the inbox and
+    // opens the card. In another topic this switches topic first, in the
+    // background like followLink(): returns "switching", and the card is
+    // created once the switch lands. Else "" on success, or an error.
+    Q_INVOKABLE QString fileInboxItem(const QString &name, const QString &topic,
+                                      const QString &fromId, const QString &how);
+    // The number a new card would get — for showing before you commit to
+    // a place. Works for any topic, current or not.
+    Q_INVOKABLE QString predictNewCard(const QString &topic, const QString &fromId, const QString &how) const;
+    // The picker's entries for any topic (note first, then cards in
+    // slip-box order), read from its branch when it isn't the current one.
+    Q_INVOKABLE QVariantList cardListFor(const QString &topic) const;
 
 signals:
     void statusChanged();
@@ -130,6 +155,9 @@ signals:
     // already merged with anything typed meanwhile. Unlike textReloaded,
     // the editor should keep the cursor where it was.
     void textMerged(const QString &text);
+    void inboxChanged();
+    // A short message for the footer (e.g. "captured to inbox").
+    void notice(const QString &message);
     // Emitted after a restore so the live editor picks up the new text —
     // the editor's text is otherwise never pushed to it from C++, only read
     // from it via noteEdited(), to avoid a binding feedback loop. Also used
@@ -186,6 +214,12 @@ private:
     // GitStore::pulled(), delivered on the UI thread while the push is
     // still running: merge what arrived and release the launch lock now.
     void onPulled();
+    void onCaptureConnection();
+    QJsonObject handleCaptureRequest(const QJsonObject &request);
+    void refreshInboxCount();
+    // Creates the card a fileInboxItem() into another topic was waiting
+    // on, once that topic's switch has landed.
+    void finishPendingFiling();
     // Shared tail of requestTopicSwitch()/requestTopicCreate(), run on the
     // UI thread once the background checkout has finished: loads the
     // freshly checked-out branch's content into the live editor and resets
@@ -222,6 +256,11 @@ private:
     // Set by followLink() across topics: the card to open once the branch
     // switch it started has landed (see applyTopicSwitch()).
     QString m_cardAfterSwitch;
+    // A fileInboxItem() into another topic, waiting on its topic switch.
+    struct PendingFiling { QString name, fromId, how, text; };
+    std::optional<PendingFiling> m_filingAfterSwitch;
+    QLocalServer m_captureServer;
+    int m_inboxCount = 0;
     // The open document's text as last read from or written to disk — the
     // common ancestor for merging a pull's change with the editor's
     // unsaved text in reloadIfChanged().
