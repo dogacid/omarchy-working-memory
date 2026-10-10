@@ -187,6 +187,11 @@ void Backend::triggerSync() {
     if (!m_store.hasRemote())
         return;
     setStatus(QStringLiteral("syncing…"));
+    // What the open document looked like going in (on disk and in the
+    // editor alike — the guard above means nothing was unsaved), so
+    // reloadIfChanged() can tell a pull's change from the user's typing.
+    m_syncDoc = m_store.activeCard();
+    m_syncBaseText = m_pendingText;
     m_syncWatcher.setFuture(QtConcurrent::run([this] { return m_store.syncWithRemote(); }));
 }
 
@@ -233,6 +238,21 @@ void Backend::reloadIfChanged() {
     const QString content = m_store.load(&ok);
     if (!ok || content == m_pendingText)
         return;
+
+    // Typing that hasn't reached disk yet (the save debounce is still
+    // pending) must never be replaced by the file: a sync takes seconds
+    // against a real remote, and the user can easily have typed — or
+    // switched to a new card and typed — the whole time it ran. Keep the
+    // buffer; the next autosave writes it out. Only if the pull really did
+    // change this same document is anything lost from the live file, and
+    // then only to git history, so say so in the log.
+    if (m_unsaved) {
+        if (m_store.activeCard() == m_syncDoc && content != m_syncBaseText)
+            m_store.logError(QStringLiteral("sync: a remote change to ")
+                + (m_syncDoc.isEmpty() ? QStringLiteral("the note") : QStringLiteral("card ") + m_syncDoc)
+                + QStringLiteral(" arrived while you were typing; kept your text (the remote version is in history)"));
+        return;
+    }
 
     m_pendingText = content;
     m_unsaved = false;

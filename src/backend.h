@@ -187,6 +187,10 @@ private:
     // Set by followLink() across topics: the card to open once the branch
     // switch it started has landed (see applyTopicSwitch()).
     QString m_cardAfterSwitch;
+    // The open document and its text when the in-flight sync started — see
+    // reloadIfChanged().
+    QString m_syncDoc;
+    QString m_syncBaseText;
 
     bool m_darkMode = true;
     QString m_themeBackground;

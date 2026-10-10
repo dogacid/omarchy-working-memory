@@ -742,6 +742,11 @@ ApplicationWindow {
                         width: historyList.width
                         highlighted: ListView.isCurrentItem
                         onClicked: historyList.currentIndex = index
+                        // The current row holds keyboard focus and, being a
+                        // button underneath, accepts Return itself — so the
+                        // list's own Keys.onReturnPressed below never sees it.
+                        Keys.onReturnPressed: win.restoreSelected()
+                        Keys.onEnterPressed: win.restoreSelected()
                         background: Rectangle {
                             color: highlighted ? backend.themeSelection : "transparent"
                         }
@@ -947,6 +952,12 @@ ApplicationWindow {
                         highlighted: ListView.isCurrentItem
                         onClicked: cardListView.currentIndex = index
                         onDoubleClicked: { cardListView.currentIndex = index; win.pickerOpenSelected(); }
+                        // The ListView hands its current row keyboard focus,
+                        // and the row (a button underneath) accepts Return
+                        // itself, so it never bubbles up to the list's
+                        // handler — catch it here instead.
+                        Keys.onReturnPressed: win.pickerOpenSelected()
+                        Keys.onEnterPressed: win.pickerOpenSelected()
                         background: Rectangle {
                             color: highlighted ? backend.themeSelection : "transparent"
                         }
