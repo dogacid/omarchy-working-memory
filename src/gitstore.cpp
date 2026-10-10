@@ -1,5 +1,7 @@
 #include "gitstore.h"
 
+#include "cards.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -11,11 +13,14 @@
 #include <QStringList>
 #include <QTextStream>
 
+#include <algorithm>
+
 namespace {
 constexpr auto kFileName = "working-memory.txt";
 constexpr auto kErrorLogName = "error.log";
 constexpr auto kFieldSep = "\x1f"; // unit separator: won't collide with real message text
 constexpr auto kBranch = "main";
+constexpr auto kCardsDir = "cards";
 }
 
 GitStore::GitStore(QObject *parent) : QObject(parent) {}
@@ -30,7 +35,8 @@ bool GitStore::open() {
             base = QDir::homePath() + QStringLiteral("/.local/share");
         m_dir = base + QStringLiteral("/omarchy-working-memory");
     }
-    m_path = m_dir + QLatin1Char('/') + QLatin1String(kFileName);
+    m_activeRel = QLatin1String(kFileName);
+    m_path = notePath();
 
     if (!QDir().mkpath(m_dir)) {
         setError(QStringLiteral("create data dir: ") + m_dir);
@@ -92,6 +98,7 @@ bool GitStore::open() {
     QFile attrFile(gitattributes);
     if (attrFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         attrFile.write(QByteArray(kFileName) + " merge=union\n");
+        attrFile.write(QByteArray(kCardsDir) + "/*.txt merge=union\n");
     }
 
     return true;
@@ -141,7 +148,8 @@ bool GitStore::save(const QString &content) {
 
 bool GitStore::commit(bool *committed) {
     const QString content = load();
-    const QString msg = previewLine(content) + QStringLiteral("  (")
+    const QString prefix = m_activeCard.isEmpty() ? QString() : (QLatin1Char('[') + m_activeCard + QStringLiteral("] "));
+    const QString msg = prefix + previewLine(content) + QStringLiteral("  (")
         + QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")) + QLatin1Char(')');
     return commitWithMessage(msg, committed);
 }
@@ -149,7 +157,15 @@ bool GitStore::commit(bool *committed) {
 bool GitStore::commitWithMessage(const QString &message, bool *committed) {
     if (committed) *committed = false;
 
-    if (!git({QStringLiteral("add"), QLatin1String(kFileName)})) {
+    // -A over the whole cards/ directory, not just the active file: a
+    // commit can be deferred (an index.lock retry, see Backend) past a
+    // switch to another card, and must still pick up the one left behind —
+    // plus any card deleted outside the app. cards/ is only named when it
+    // exists, since `git add` rejects a pathspec that matches nothing.
+    QStringList addArgs{QStringLiteral("add"), QStringLiteral("-A"), QStringLiteral("--"), QLatin1String(kFileName)};
+    if (QDir(m_dir + QLatin1Char('/') + QLatin1String(kCardsDir)).exists())
+        addArgs.append(QLatin1String(kCardsDir));
+    if (!git(addArgs)) {
         setError(QStringLiteral("git add: ") + errorString());
         return false;
     }
@@ -176,7 +192,7 @@ QList<GitStore::Commit> GitStore::log(bool *ok) const {
     const QString out = gitOutput({
         QStringLiteral("log"),
         QStringLiteral("--format=%H") + QLatin1String(kFieldSep) + QStringLiteral("%cI") + QLatin1String(kFieldSep) + QStringLiteral("%s"),
-        QStringLiteral("--"), QLatin1String(kFileName)
+        QStringLiteral("--"), m_activeRel
     }, &queryOk);
 
     QList<Commit> commits;
@@ -207,7 +223,7 @@ QList<GitStore::Commit> GitStore::log(bool *ok) const {
 
 QString GitStore::showAt(const QString &hash, bool *ok) const {
     bool queryOk = false;
-    const QString out = gitOutput({QStringLiteral("show"), hash + QLatin1Char(':') + QLatin1String(kFileName)}, &queryOk);
+    const QString out = gitOutput({QStringLiteral("show"), hash + QLatin1Char(':') + m_activeRel}, &queryOk);
     if (ok) *ok = queryOk;
     return out;
 }
@@ -225,6 +241,97 @@ bool GitStore::restoreAt(const QString &hash, const QDateTime &at) {
     const QString message = QStringLiteral("restore from ") + shortHash(hash) + QStringLiteral(" (")
         + at.toString(QStringLiteral("yyyy-MM-dd HH:mm")) + QStringLiteral("): ") + previewLine(content);
     return commitWithMessage(message, nullptr);
+}
+
+QString GitStore::notePath() const {
+    return m_dir + QLatin1Char('/') + QLatin1String(kFileName);
+}
+
+QString GitStore::cardRelPath(const QString &id) const {
+    return QLatin1String(kCardsDir) + QLatin1Char('/') + id + QStringLiteral(".txt");
+}
+
+void GitStore::setActiveCard(const QString &id) {
+    m_activeCard = id;
+    m_activeRel = id.isEmpty() ? QString(QLatin1String(kFileName)) : cardRelPath(id);
+    m_path = m_dir + QLatin1Char('/') + m_activeRel;
+}
+
+QStringList GitStore::cardIds() const {
+    QStringList ids;
+    const QDir dir(m_dir + QLatin1Char('/') + QLatin1String(kCardsDir));
+    for (const QString &name : dir.entryList({QStringLiteral("*.txt")}, QDir::Files)) {
+        const QString id = name.chopped(4);
+        if (Cards::isValidId(id))
+            ids.append(id);
+    }
+    std::sort(ids.begin(), ids.end(), Cards::lessThan);
+    return ids;
+}
+
+bool GitStore::cardExists(const QString &id) const {
+    return Cards::isValidId(id) && QFile::exists(m_dir + QLatin1Char('/') + cardRelPath(id));
+}
+
+QString GitStore::readDocument(const QString &id) const {
+    QFile f(id.isEmpty() ? notePath() : m_dir + QLatin1Char('/') + cardRelPath(id));
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+        return QString();
+    return QString::fromUtf8(f.readAll());
+}
+
+QHash<QString, QDateTime> GitStore::cardCreatedTimes() const {
+    // Newest first, so a card that was deleted and re-added keeps the time
+    // of its latest creation: only the first sighting of each path counts.
+    bool ok = false;
+    const QString out = gitOutput({
+        QStringLiteral("log"), QStringLiteral("--diff-filter=A"), QStringLiteral("--name-only"),
+        QStringLiteral("--format=") + QLatin1String(kFieldSep) + QStringLiteral("%cI"),
+        QStringLiteral("--"), QLatin1String(kCardsDir)
+    }, &ok);
+    QHash<QString, QDateTime> times;
+    if (!ok)
+        return times;
+    QDateTime current;
+    for (const QString &line : out.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+        if (line.startsWith(QLatin1String(kFieldSep))) {
+            current = QDateTime::fromString(line.mid(1), Qt::ISODate);
+            continue;
+        }
+        const QString name = QFileInfo(line).fileName();
+        if (!name.endsWith(QStringLiteral(".txt")) || !current.isValid())
+            continue;
+        const QString id = name.chopped(4);
+        if (!times.contains(id))
+            times.insert(id, current);
+    }
+    for (const QString &id : cardIds()) {
+        if (!times.contains(id))
+            times.insert(id, QFileInfo(m_dir + QLatin1Char('/') + cardRelPath(id)).lastModified());
+    }
+    return times;
+}
+
+bool GitStore::createCard(const QString &id) {
+    if (!Cards::isValidId(id)) {
+        setError(QStringLiteral("invalid card number: ") + id);
+        return false;
+    }
+    if (!QDir().mkpath(m_dir + QLatin1Char('/') + QLatin1String(kCardsDir))) {
+        setError(QStringLiteral("create cards dir"));
+        return false;
+    }
+    QFile f(m_dir + QLatin1Char('/') + cardRelPath(id));
+    if (f.exists()) {
+        setError(QStringLiteral("card ") + id + QStringLiteral(" already exists"));
+        return false;
+    }
+    if (!f.open(QIODevice::WriteOnly)) {
+        setError(QStringLiteral("create card: ") + f.errorString());
+        return false;
+    }
+    f.close();
+    return commitWithMessage(QStringLiteral("New card: ") + id, nullptr);
 }
 
 bool GitStore::localBranchExists(const QString &branch) const {
@@ -328,13 +435,23 @@ QString GitStore::createTopicBranch(const QString &name) {
     if (!git({QStringLiteral("checkout"), QStringLiteral("-q"), QStringLiteral("-b"), branch}))
         return QStringLiteral("git checkout -b: ") + errorString();
 
-    // Blank slate: clear the note and commit that as the topic's own
+    // Blank slate: clear the note and drop any cards inherited from the
+    // branch this was created off, then commit that as the topic's own
     // starting point, independent of whatever main (or wherever this was
     // branched from) currently says. A no-op, harmlessly, if the source
     // content was already empty — commitWithMessage() already treats "no
-    // diff" as success, not a failure.
-    if (!save(QString()))
-        return QStringLiteral("create topic file: ") + errorString();
+    // diff" as success, not a failure. The note is written by path rather
+    // than through save(), which targets whichever card happens to be
+    // active — Backend only resets that once the switch has landed.
+    {
+        QSaveFile f(notePath());
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Text) || !f.commit())
+            return QStringLiteral("create topic file: ") + f.errorString();
+    }
+    if (!git({QStringLiteral("rm"), QStringLiteral("-r"), QStringLiteral("-q"), QStringLiteral("--ignore-unmatch"),
+              QLatin1String(kCardsDir)}))
+        return QStringLiteral("git rm cards: ") + errorString();
+    QDir(m_dir + QLatin1Char('/') + QLatin1String(kCardsDir)).removeRecursively();
     if (!commitWithMessage(QStringLiteral("Start topic: ") + slug, nullptr))
         return QStringLiteral("git commit: ") + errorString();
 
@@ -437,7 +554,7 @@ bool GitStore::pullFromRemote(bool *conflict) {
     // ever saved, it's safe to clear it so the incoming history lands
     // cleanly (a plain fast-forward, not a real merge, in this case).
     if (!hasCommits())
-        QFile::remove(m_path);
+        QFile::remove(notePath());
 
     // --allow-unrelated-histories is required, not optional: every machine
     // creates its own independent init history in open() before origin is

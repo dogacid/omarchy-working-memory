@@ -132,6 +132,9 @@ What's different from Omarchy:
 | `Ctrl+1`..`Ctrl+9`     | Jump to the Nth heading in the note        |
 | `Ctrl+T`               | Switch topic (see below)                  |
 | `Ctrl+Shift+T`         | Create a new topic                        |
+| `Ctrl+I`               | Index cards in this topic (see below)     |
+| `Ctrl+Shift+I`         | New index card after the open one         |
+| `Ctrl+O`               | Jump back after following a card link     |
 | `Esc`                 | Enter vim Normal mode (see below); `?` once there for the full shortcut reference |
 
 Otherwise it's a normal text field — click-drag or `Shift`+arrows to select,
@@ -199,6 +202,52 @@ copy it across by hand the same way you'd copy from any other note.
   will see it on another once the regular background sync has had a chance
   to fetch — no separate setup. Switching to a topic pulls its latest
   content immediately, same as opening the app fresh does for `main`.
+
+### Index cards (`Ctrl+I` / `Ctrl+Shift+I`)
+
+Within any topic you can keep a set of index cards, numbered the way Niklas
+Luhmann numbered the slips in his Zettelkasten. A card's number is its
+permanent address and is never changed, and the number itself says where
+the card sits in a line of thought:
+
+- **Continuing** a thought takes the next number in the same run: `1` → `2`,
+  `1a` → `1b`, `1a1` → `1a2`.
+- **Branching** off a card adds a level: `1` → `1a`, `1a` → `1a1`. Numbers
+  and letters alternate, and letters run `a`…`z`, `aa`, `ab`, …
+- In order, a branch files directly behind the card it grew from and ahead
+  of that card's next sibling: `1, 1a, 1a1, 1a2, 1b, 2`. That's how
+  Luhmann put a new card "in between" without renumbering anything.
+
+**`Ctrl+Shift+I`** creates a new card after the one you're on, using
+Luhmann's own rule: the next number if it's free, or a branch if that
+number is already taken (e.g. continuing from `1` when `2` already exists
+gives `1a`). From the topic's note it starts the next top-level card.
+
+**`Ctrl+I`** opens the card picker, which is laid out like the history
+viewer: the cards on the left in slip-box order (indented by branch, with
+the topic note first and each card's creation time), and the highlighted
+card's text on the right.
+
+| Key in the picker | Action |
+|-------------------|--------|
+| `j`/`k`, `↑`/`↓`, `g`/`G` | Move, or jump to the top/bottom |
+| `Enter`           | Open the card (or the topic note) |
+| `l`               | Insert a link to the card at your cursor in the text you came from |
+| `y`               | Copy the link to the clipboard |
+| `c`               | New card after the highlighted one (same rule as `Ctrl+Shift+I`) |
+| `b`               | New branch off the highlighted one (always a child) |
+| `/`               | Search by number prefix or text |
+| `Esc` / `Ctrl+I`  | Back to the editor |
+
+A link looks like `[[topic:1a2]]` (e.g. `[[main:3]]`). It always names the
+topic, so it still works after being copied into another topic. In vim
+Normal mode, `Enter` or `gd` on a link opens that card, switching topic
+first if it has to, and `Ctrl+O` jumps back to where you were.
+
+Each card is a plain file, `cards/<number>.txt`, on the topic's branch.
+Cards are saved, committed and synced exactly like the note, `Ctrl+R` shows
+the history of whichever card is open, and the window title and footer show
+which card that is. A new topic starts with no cards.
 
 ### Headings and jumping (`Ctrl+1`..`Ctrl+9`)
 

@@ -24,6 +24,8 @@ class Backend : public QObject {
     Q_PROPERTY(QString themeSelection READ themeSelection NOTIFY themeChanged)
     Q_PROPERTY(QString themeMuted READ themeMuted NOTIFY themeChanged)
     Q_PROPERTY(QString currentTopic READ currentTopic NOTIFY currentTopicChanged)
+    // Empty while editing the topic's note, else the open index card's ID.
+    Q_PROPERTY(QString currentCard READ currentCard NOTIFY currentCardChanged)
 
 public:
     explicit Backend(QObject *parent = nullptr);
@@ -49,6 +51,7 @@ public:
     QString themeSelection() const { return m_themeSelection; }
     QString themeMuted() const { return m_themeMuted; }
     QString currentTopic() const { return m_store.currentTopic(); }
+    QString currentCard() const { return m_store.activeCard(); }
 
     Q_INVOKABLE QString initialText() const;
     Q_INVOKABLE void noteEdited(const QString &text);
@@ -75,11 +78,38 @@ public:
     // inline in the creation prompt.
     Q_INVOKABLE void requestTopicCreate(const QString &name);
 
+    // --- Index cards (see cards.h / gitstore.h) ------------------------
+    // {id, title, time, depth, current} per entry for the Ctrl+I picker:
+    // the topic note first (id ""), then every card in slip-box order.
+    Q_INVOKABLE QVariantList cardList() const;
+    // A card's (or, for "", the note's) text, for the picker's preview.
+    Q_INVOKABLE QString cardContent(const QString &id) const;
+    // The text inserted by the picker's "l": [[<topic>:<id>]], always
+    // naming the topic so the link still resolves once copied elsewhere.
+    Q_INVOKABLE QString cardLink(const QString &id) const;
+    // All three below flush the open document first (save + commit, like
+    // Ctrl+S), then switch the editor to the target. They return an empty
+    // string on success, else a message fit to show the user.
+    //
+    // Opens a card in the current topic ("" = the topic note).
+    Q_INVOKABLE QString openCard(const QString &id);
+    // Creates a card relative to fromId and opens it: "continue" files it
+    // after fromId (next sibling, or a branch if that number's taken),
+    // "branch" always makes it a child. From the note (fromId ""), either
+    // way it's the next top-level number.
+    Q_INVOKABLE QString newCard(const QString &fromId, const QString &how);
+    // Opens the card a [[topic:id]] link points at. Within the current
+    // topic that's immediate; another topic needs a branch switch first,
+    // which runs in the background like Ctrl+T's — then this returns
+    // "switching" and the outcome arrives via topicOpFinished().
+    Q_INVOKABLE QString followLink(const QString &link);
+
 signals:
     void statusChanged();
     void lastErrorChanged();
     void themeChanged();
     void currentTopicChanged();
+    void currentCardChanged();
     // Emitted after a restore so the live editor picks up the new text —
     // the editor's text is otherwise never pushed to it from C++, only read
     // from it via noteEdited(), to avoid a binding feedback loop. Also used
@@ -136,6 +166,12 @@ private:
     // QtConcurrent worker thread in requestTopicSwitch()/requestTopicCreate(),
     // never the UI thread, precisely so this wait can never freeze the UI.
     void waitForSyncToStop();
+    // save() and report whether the open document is now safely on disk —
+    // the precondition for pointing the editor at a different one.
+    bool flushForSwitch(QString *error);
+    // Makes id ("" = note) the active document and loads it into the
+    // editor. Assumes flushForSwitch() already succeeded.
+    void activateDocument(const QString &id);
 
     GitStore m_store;
     QString m_pendingText;
@@ -148,6 +184,9 @@ private:
     QTimer m_periodicSyncTimer;
     QFutureWatcher<GitStore::SyncOutcome> m_syncWatcher;
     QFutureWatcher<QString> m_topicWatcher;
+    // Set by followLink() across topics: the card to open once the branch
+    // switch it started has landed (see applyTopicSwitch()).
+    QString m_cardAfterSwitch;
 
     bool m_darkMode = true;
     QString m_themeBackground;

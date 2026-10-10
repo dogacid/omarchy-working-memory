@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QString>
 #include <QDateTime>
+#include <QHash>
 #include <QList>
 #include <QMutex>
 #include <atomic>
@@ -47,12 +48,38 @@ public:
     QString logPath() const;
     QString errorString() const;
 
+    // load/save/log/showAt/restoreAt all act on the *active document*: the
+    // topic's note (working-memory.txt) by default, or one of its index
+    // cards (cards/<id>.txt) once setActiveCard() picks one.
     QString load(bool *ok = nullptr) const;
     bool save(const QString &content);
 
-    // Commits the note file if it has changes; returns false only on a real
-    // git failure, true (with committed set) otherwise.
+    // Commits the note and every card file (so a commit deferred past a
+    // card switch never strands the previous card's edits); returns false
+    // only on a real git failure, true (with committed set) otherwise.
     bool commit(bool *committed = nullptr);
+
+    // --- Index cards: plain files under cards/ on the current topic's
+    // branch, named by their Luhmann-style ID (see cards.h). Like the note
+    // itself they're versioned and synced by the ordinary commit/sync path —
+    // nothing card-specific happens on the git side.
+    //
+    // Empty id = the topic note.
+    void setActiveCard(const QString &id);
+    QString activeCard() const { return m_activeCard; }
+    // Valid card IDs present in the working tree, in slip-box order.
+    QStringList cardIds() const;
+    bool cardExists(const QString &id) const;
+    // Reads any card (or, for an empty id, the note) straight from disk,
+    // without changing which document is active.
+    QString readDocument(const QString &id) const;
+    // When each card was first committed, from a single `git log` over
+    // cards/ — far cheaper than one call per card. A card that was never
+    // committed falls back to its file's mtime.
+    QHash<QString, QDateTime> cardCreatedTimes() const;
+    // Writes an empty cards/<id>.txt and commits it. Fails rather than
+    // overwriting if the card already exists.
+    bool createCard(const QString &id);
 
     QList<Commit> log(bool *ok = nullptr) const;
     QString showAt(const QString &hash, bool *ok = nullptr) const;
@@ -146,8 +173,13 @@ private:
     // caller (createTopicBranch) is what turns that into a real error.
     static QString slugify(const QString &name);
 
+    QString cardRelPath(const QString &id) const;
+    QString notePath() const;
+
     QString m_dir;
-    QString m_path;
+    QString m_path;        // absolute path of the active document
+    QString m_activeRel;   // the same, relative to m_dir (for git pathspecs)
+    QString m_activeCard;  // empty when the active document is the note
     mutable QMutex m_errorMutex;
     mutable QString m_error;
     std::atomic<bool> m_cancelSync{false};

@@ -10,7 +10,8 @@ ApplicationWindow {
     minimumWidth: 420
     minimumHeight: 300
     visible: true
-    title: backend.currentTopic === "main" ? "Working memory" : "Working memory — " + backend.currentTopic
+    title: (backend.currentTopic === "main" ? "Working memory" : "Working memory — " + backend.currentTopic)
+           + (backend.currentCard ? " › " + backend.currentCard : "")
     color: backend.themeBackground
 
     // The error overlay is independent of this and just layers on top
@@ -61,6 +62,24 @@ ApplicationWindow {
     // enough to matter. Disables the overlay's input and a second attempt
     // until topicOpFinished arrives.
     property bool topicBusy: false
+
+    // --- Index cards (Ctrl+I picker, Ctrl+Shift+I new card) — see
+    // backend's cardList()/openCard()/newCard()/followLink(), and cards.h
+    // for the Luhmann numbering itself. The picker is a third full-window
+    // mode beside "edit" and "history", laid out the same way as history.
+    property var cardEntries: []
+    property var filteredCards: []
+    property var selectedCard: null
+    property string cardPreview: ""
+    // Vim-style jump list for Ctrl+O: where you were ({topic, card, pos})
+    // each time a link or the picker took you somewhere else.
+    property var jumpStack: []
+    // Cursor position to restore on the next textReloaded — set right
+    // before a jump back, since a reload otherwise lands at the end.
+    property int pendingCursor: -1
+    // A short message that takes over the footer's status slot for a few
+    // seconds — card operations' errors have no overlay of their own.
+    property string flashMessage: ""
 
     onClosing: backend.save()
 
@@ -319,6 +338,130 @@ ApplicationWindow {
         editor.forceActiveFocus();
     }
 
+    // --- Index cards ----------------------------------------------------
+    function flash(msg) {
+        win.flashMessage = msg;
+        flashTimer.restart();
+    }
+
+    function openCardPicker() {
+        win.cardEntries = backend.cardList();
+        win.filteredCards = win.cardEntries;
+        cardSearch.text = "";
+        mode = "cards";
+        // Start on the open document, so the picker reads as "you are here".
+        let start = 0;
+        for (let i = 0; i < win.filteredCards.length; i++)
+            if (win.filteredCards[i].current) { start = i; break; }
+        cardListView.currentIndex = win.filteredCards.length > 0 ? start : -1;
+        win.showSelectedCard();
+        cardListView.forceActiveFocus();
+    }
+    function filterCards(query) {
+        const q = query.toLowerCase();
+        win.filteredCards = q
+            ? win.cardEntries.filter(function (c) {
+                return c.id.indexOf(q) === 0 || c.title.toLowerCase().indexOf(q) !== -1;
+              })
+            : win.cardEntries;
+        cardListView.currentIndex = win.filteredCards.length > 0 ? 0 : -1;
+        win.showSelectedCard();
+    }
+    function showSelectedCard() {
+        const c = cardListView.currentIndex >= 0 ? win.filteredCards[cardListView.currentIndex] : null;
+        win.selectedCard = c;
+        win.cardPreview = c ? backend.cardContent(c.id) : "";
+    }
+    function pushJump() {
+        const stack = win.jumpStack.slice();
+        stack.push({ topic: backend.currentTopic, card: backend.currentCard, pos: editor.cursorPosition });
+        if (stack.length > 50) stack.shift();
+        win.jumpStack = stack;
+    }
+    function pickerOpenSelected() {
+        if (!win.selectedCard) return;
+        if (win.selectedCard.id !== backend.currentCard) win.pushJump();
+        const err = backend.openCard(win.selectedCard.id);
+        if (err) { win.flash(err); return; }
+        win.backToEdit();
+    }
+    // c / b in the picker, and Ctrl+Shift+I from the editor (always
+    // "continue" from whatever's open).
+    function newCardFrom(fromId, how) {
+        if (win.topicBusy) return;
+        win.pushJump();
+        const err = backend.newCard(fromId, how);
+        if (err) { win.flash(err); return; }
+        win.backToEdit();
+    }
+    // l: drop a link to the highlighted card into the document you came
+    // from, exactly where its cursor was, and go back to it.
+    function pickerInsertLink() {
+        if (!win.selectedCard || win.selectedCard.id === "") return;
+        const link = backend.cardLink(win.selectedCard.id);
+        const pos = editor.cursorPosition;
+        editor.insert(pos, link);
+        win.backToEdit();
+        editor.cursorPosition = pos + link.length;
+    }
+    function pickerYankLink() {
+        if (!win.selectedCard || win.selectedCard.id === "") return;
+        backend.copyToClipboard(backend.cardLink(win.selectedCard.id));
+        win.flash("copied " + backend.cardLink(win.selectedCard.id));
+    }
+
+    // The [[topic:id]] link the cursor is on, if any — the cursor counts as
+    // "on" it anywhere from the first "[" to the last "]".
+    function linkAtCursor() {
+        const text = editor.text, pos = editor.cursorPosition;
+        const lineStart = text.lastIndexOf("\n", pos - 1) + 1;
+        let lineEnd = text.indexOf("\n", pos);
+        if (lineEnd === -1) lineEnd = text.length;
+        const line = text.slice(lineStart, lineEnd);
+        const re = /\[\[[^\]:\n]+:[0-9a-z]+\]\]/g;
+        let m;
+        while ((m = re.exec(line)) !== null) {
+            const start = lineStart + m.index, end = start + m[0].length;
+            if (pos >= start && pos <= end) return m[0];
+        }
+        return "";
+    }
+    function followLinkAtCursor() {
+        const link = win.linkAtCursor();
+        if (!link) { win.flash("no card link under the cursor"); return; }
+        if (win.topicBusy) return;
+        win.pushJump();
+        const err = backend.followLink(link);
+        if (err === "switching") { win.topicBusy = true; return; }
+        if (err) { win.jumpStack = win.jumpStack.slice(0, -1); win.flash(err); }
+    }
+    function jumpBack() {
+        if (win.topicBusy || win.jumpStack.length === 0) return;
+        const stack = win.jumpStack.slice();
+        const j = stack.pop();
+        win.jumpStack = stack;
+        if (j.topic === backend.currentTopic) {
+            if (j.card === backend.currentCard) {
+                editor.cursorPosition = Math.min(j.pos, editor.text.length);
+                return;
+            }
+            win.pendingCursor = j.pos;
+            const err = backend.openCard(j.card);
+            if (err) { win.pendingCursor = -1; win.flash(err); }
+            return;
+        }
+        win.pendingCursor = j.pos;
+        win.topicBusy = true;
+        if (j.card) {
+            const err = backend.followLink("[[" + j.topic + ":" + j.card + "]]");
+            if (err !== "switching") { win.topicBusy = false; win.pendingCursor = -1; if (err) win.flash(err); }
+        } else {
+            backend.requestTopicSwitch(j.topic === "main" ? "main" : "topic/" + j.topic);
+        }
+    }
+
+    Timer { id: flashTimer; interval: 4000; onTriggered: win.flashMessage = "" }
+
     // Global shortcuts. Ctrl+E (drop to a real editor for selection) is
     // gone entirely now that the editor is a native QQuickTextArea with
     // real shift-arrow/word/mouse selection built in.
@@ -339,6 +482,24 @@ ApplicationWindow {
         sequence: "Ctrl+T"
         enabled: win.mode === "edit" && !win.showHelp && !win.showTopicCreator && !win.topicBusy && backend.lastError === ""
         onActivated: win.openTopicSwitcher()
+    }
+    Shortcut {
+        sequence: "Ctrl+I"
+        enabled: (win.mode === "edit" || win.mode === "cards") && !win.showHelp && !win.showTopicSwitcher
+                 && !win.showTopicCreator && !win.topicBusy && backend.lastError === ""
+        onActivated: win.mode === "edit" ? win.openCardPicker() : win.backToEdit()
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+I"
+        enabled: win.mode === "edit" && !win.showHelp && !win.showTopicSwitcher
+                 && !win.showTopicCreator && !win.topicBusy && backend.lastError === ""
+        onActivated: win.newCardFrom(backend.currentCard, "continue")
+    }
+    Shortcut {
+        sequence: "Ctrl+O"
+        enabled: win.mode === "edit" && !win.showHelp && !win.showTopicSwitcher
+                 && !win.showTopicCreator && !win.topicBusy && backend.lastError === ""
+        onActivated: win.jumpBack()
     }
     Shortcut {
         sequence: "Ctrl+Shift+T"
@@ -381,7 +542,8 @@ ApplicationWindow {
         target: backend
         function onTextReloaded(text) {
             editor.text = text;
-            editor.cursorPosition = text.length;
+            editor.cursorPosition = win.pendingCursor >= 0 ? Math.min(win.pendingCursor, text.length) : text.length;
+            win.pendingCursor = -1;
             // The content just got replaced wholesale (a restore, or a
             // background sync pulling in another machine's edit) — any
             // Normal/Visual-mode selection would now be pointing at
@@ -471,6 +633,14 @@ ApplicationWindow {
                     // Visual mode: updateEditorSelection() does nothing in
                     // Normal and extends the selection to the new cursor
                     // position in Visual.
+                    // gd / Enter: follow the [[topic:id]] card link under
+                    // the cursor (Ctrl+O comes back), vim's go-to-definition.
+                    if (hadG && event.text === "d") { win.followLinkAtCursor(); return; }
+                    if (win.editorMode === "normal" && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
+                        win.followLinkAtCursor();
+                        return;
+                    }
+
                     if (event.text === "g") {
                         if (hadG) { editor.cursorPosition = 0; win.updateEditorSelection(); }
                         else win.pendingG = true;
@@ -713,6 +883,155 @@ ApplicationWindow {
             }
         }
 
+        // --- Index cards: the same list-beside-preview layout as history,
+        // the list in slip-box order and indented by branch depth so the
+        // shape of each line of thought shows at a glance.
+        RowLayout {
+            visible: win.mode === "cards"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 0
+
+            ColumnLayout {
+                Layout.preferredWidth: 320
+                Layout.minimumWidth: 320
+                Layout.maximumWidth: 320
+                Layout.fillHeight: true
+                spacing: 0
+
+                TextField {
+                    id: cardSearch
+                    Layout.fillWidth: true
+                    placeholderText: "Search cards (number or text)…"
+                    color: backend.themeForeground
+                    placeholderTextColor: backend.themeMuted
+                    background: Rectangle { color: backend.themeSelection }
+                    onTextChanged: win.filterCards(text)
+                    Keys.onDownPressed: cardListView.forceActiveFocus()
+                    Keys.onEscapePressed: cardListView.forceActiveFocus()
+                    Keys.onReturnPressed: cardListView.forceActiveFocus()
+                    Keys.onEnterPressed: cardListView.forceActiveFocus()
+                }
+
+                ListView {
+                    id: cardListView
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    model: win.filteredCards
+                    clip: true
+                    keyNavigationEnabled: true
+                    highlightMoveDuration: 60
+                    onCurrentIndexChanged: win.showSelectedCard()
+
+                    // Letters are commands here (as in history), so search
+                    // sits behind "/" rather than "just start typing".
+                    Keys.onPressed: function (event) {
+                        if (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) return;
+                        let handled = true;
+                        if (event.text === "j") cardListView.currentIndex = Math.min(cardListView.currentIndex + 1, cardListView.count - 1);
+                        else if (event.text === "k") cardListView.currentIndex = Math.max(cardListView.currentIndex - 1, 0);
+                        else if (event.text === "g") cardListView.currentIndex = 0;
+                        else if (event.text === "G") cardListView.currentIndex = cardListView.count - 1;
+                        else if (event.key === Qt.Key_Slash) cardSearch.forceActiveFocus();
+                        else if (event.text === "l") win.pickerInsertLink();
+                        else if (event.text === "y") win.pickerYankLink();
+                        else if (event.text === "c" && win.selectedCard) win.newCardFrom(win.selectedCard.id, "continue");
+                        else if (event.text === "b" && win.selectedCard) win.newCardFrom(win.selectedCard.id, "branch");
+                        else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) win.pickerOpenSelected();
+                        else handled = false;
+                        if (handled) event.accepted = true;
+                    }
+
+                    delegate: ItemDelegate {
+                        width: cardListView.width
+                        highlighted: ListView.isCurrentItem
+                        onClicked: cardListView.currentIndex = index
+                        onDoubleClicked: { cardListView.currentIndex = index; win.pickerOpenSelected(); }
+                        background: Rectangle {
+                            color: highlighted ? backend.themeSelection : "transparent"
+                        }
+                        // Plain Column with explicit widths, for the same
+                        // reason as the history delegate: keeps a long
+                        // title from widening the fixed-width list.
+                        contentItem: Column {
+                            width: cardListView.width - 24
+                            leftPadding: modelData.depth * 14
+                            spacing: 2
+                            Row {
+                                spacing: 8
+                                Text {
+                                    text: modelData.id === "" ? "note" : modelData.id
+                                    color: modelData.id === "" ? backend.themeMuted : backend.themeAccent
+                                    font.family: "monospace"
+                                    font.bold: true
+                                    font.italic: modelData.id === ""
+                                }
+                                Text { text: modelData.time; color: backend.themeMuted; font.pixelSize: 11 }
+                                Text { text: modelData.current ? "●" : ""; color: backend.themeAccent; font.pixelSize: 11 }
+                            }
+                            Text {
+                                text: modelData.title || "(empty)"
+                                color: modelData.title ? backend.themeForeground : backend.themeMuted
+                                elide: Text.ElideRight
+                                width: parent.width - parent.leftPadding
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { Layout.fillHeight: true; width: 1; color: backend.themeMuted; opacity: 0.3 }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 0
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 36
+                    color: backend.themeSelection
+                    visible: win.selectedCard !== null
+
+                    Text {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 16
+                        anchors.right: parent.right
+                        anchors.rightMargin: 12
+                        color: backend.themeForeground
+                        font.bold: true
+                        elide: Text.ElideRight
+                        text: !win.selectedCard ? ""
+                            : win.selectedCard.id === "" ? backend.currentTopic + " — topic note"
+                            : "Card " + win.selectedCard.id + "  ·  " + win.selectedCard.time
+                    }
+                }
+
+                ScrollView {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+
+                    TextArea {
+                        readOnly: true
+                        selectByMouse: true
+                        wrapMode: TextArea.Wrap
+                        text: win.cardPreview
+                        font.family: "monospace"
+                        font.pixelSize: 15
+                        color: backend.themeForeground
+                        selectionColor: backend.themeSelection
+                        selectedTextColor: backend.themeForeground
+                        background: Rectangle { color: Qt.darker(backend.themeBackground, 1.08) }
+                        topPadding: 12
+                        leftPadding: 16
+                        rightPadding: 16
+                        bottomPadding: 12
+                    }
+                }
+            }
+        }
+
         // --- Footer -----------------------------------------------------
         Rectangle {
             Layout.fillWidth: true
@@ -738,6 +1057,8 @@ ApplicationWindow {
                             const pending = win.pendingD ? "  d" : win.pendingG ? "  g" : "";
                             return "-- " + label + " --" + pending + "   ?  help";
                         }
+                        if (win.mode === "cards")
+                            return "j/k move · enter open · l link here · y copy link · c new after · b branch · / search · esc back";
                         if (win.previewSelMode !== "none")
                             return "h/j/k/l move · gg/G top/bottom · y/ctrl+c/super+c yank · esc cancel"
                                 + (win.previewPendingG ? "   g" : "");
@@ -747,7 +1068,9 @@ ApplicationWindow {
                 Text {
                     color: backend.themeAccent
                     font.pixelSize: 12
-                    text: win.mode === "edit" ? backend.status : ""
+                    text: win.flashMessage ? win.flashMessage
+                        : win.mode === "edit" ? (backend.currentCard ? "card " + backend.currentCard + " · " : "") + backend.status
+                        : ""
                 }
             }
         }
@@ -855,6 +1178,9 @@ ApplicationWindow {
                                 { key: "Ctrl+1..9", desc: "Jump to the Nth heading" },
                                 { key: "Ctrl+T", desc: "Switch topic" },
                                 { key: "Ctrl+Shift+T", desc: "Create a new topic" },
+                                { key: "Ctrl+I", desc: "Index cards in this topic (l there links one here)" },
+                                { key: "Ctrl+Shift+I", desc: "New card after the open one (Luhmann numbering)" },
+                                { key: "Ctrl+O", desc: "Jump back to where a link or card took you from" },
                                 { key: "Esc", desc: "Enter vim Normal mode" }
                             ]},
                             { title: "Normal mode", items: [
@@ -866,6 +1192,7 @@ ApplicationWindow {
                                 { key: "V", desc: "Visual line mode" },
                                 { key: "dd", desc: "Delete the line (copied to clipboard)" },
                                 { key: "D", desc: "Delete to end of line (copied to clipboard)" },
+                                { key: "Enter / gd", desc: "Follow the [[topic:card]] link under the cursor" },
                                 { key: "?", desc: "Toggle this help" }
                             ]},
                             { title: "Visual mode", items: [

@@ -1,10 +1,13 @@
 #include "backend.h"
 
+#include "cards.h"
+
 #include <QClipboard>
 #include <QColor>
 #include <QDir>
 #include <QFile>
 #include <QGuiApplication>
+#include <QRegularExpression>
 #include <QTextStream>
 #include <QVariantMap>
 #include <QtConcurrent>
@@ -352,7 +355,10 @@ void Backend::requestTopicCreate(const QString &name) {
 void Backend::onTopicOpFinished() {
     const QString err = m_topicWatcher.result();
     if (!err.isEmpty()) {
-        setStatus(QStringLiteral("synced"));
+        // A switch started by followLink() has no overlay of its own to
+        // show the error in, so it goes in the status line instead.
+        setStatus(m_cardAfterSwitch.isEmpty() ? QStringLiteral("synced") : QStringLiteral("link: ") + err);
+        m_cardAfterSwitch.clear();
         emit topicOpFinished(err);
         return;
     }
@@ -368,6 +374,15 @@ void Backend::waitForSyncToStop() {
 }
 
 void Backend::applyTopicSwitch() {
+    // Every switch lands on the new topic's note, unless followLink() asked
+    // for one of its cards — and that card actually exists over there.
+    const QString card = m_store.cardExists(m_cardAfterSwitch) ? m_cardAfterSwitch : QString();
+    if (!m_cardAfterSwitch.isEmpty() && card.isEmpty())
+        m_store.logError(QStringLiteral("link: no card ") + m_cardAfterSwitch + QStringLiteral(" in this topic"));
+    m_cardAfterSwitch.clear();
+    m_store.setActiveCard(card);
+    emit currentCardChanged();
+
     bool ok = false;
     const QString content = m_store.load(&ok);
     if (!ok) {
@@ -385,6 +400,154 @@ void Backend::applyTopicSwitch() {
     // Pull-then-push for the topic just switched into, same as opening the
     // app fresh — it may have changes waiting from another machine.
     triggerSync();
+}
+
+namespace {
+QString firstLine(const QString &content) {
+    for (const QString &line : content.split(QLatin1Char('\n'))) {
+        const QString t = line.trimmed();
+        if (!t.isEmpty())
+            return t;
+    }
+    return QString();
+}
+}
+
+QVariantList Backend::cardList() const {
+    const QString current = m_store.activeCard();
+    QVariantList out;
+
+    QVariantMap note;
+    note[QStringLiteral("id")] = QString();
+    note[QStringLiteral("title")] = firstLine(m_store.readDocument(QString()));
+    note[QStringLiteral("time")] = QString();
+    note[QStringLiteral("depth")] = 0;
+    note[QStringLiteral("current")] = current.isEmpty();
+    out.append(note);
+
+    const QHash<QString, QDateTime> times = m_store.cardCreatedTimes();
+    for (const QString &id : m_store.cardIds()) {
+        QVariantMap m;
+        m[QStringLiteral("id")] = id;
+        m[QStringLiteral("title")] = firstLine(m_store.readDocument(id));
+        m[QStringLiteral("time")] = times.value(id).toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+        m[QStringLiteral("depth")] = Cards::depth(id);
+        m[QStringLiteral("current")] = (id == current);
+        out.append(m);
+    }
+    return out;
+}
+
+QString Backend::cardContent(const QString &id) const {
+    // The open document's freshest text is in memory, not necessarily on
+    // disk yet (the save debounce may not have fired).
+    if (id == m_store.activeCard())
+        return m_pendingText;
+    return m_store.readDocument(id);
+}
+
+QString Backend::cardLink(const QString &id) const {
+    return QStringLiteral("[[") + m_store.currentTopic() + QLatin1Char(':') + id + QStringLiteral("]]");
+}
+
+bool Backend::flushForSwitch(QString *error) {
+    save();
+    // Only m_unsaved blocks a switch: once the text is on disk, a commit
+    // that's merely pending (an index.lock retry) is harmless, since
+    // GitStore::commit() stages every card, not just the active one.
+    if (m_unsaved || !m_lastError.isEmpty()) {
+        *error = QStringLiteral("still saving — try again in a moment");
+        return false;
+    }
+    return true;
+}
+
+void Backend::activateDocument(const QString &id) {
+    m_store.setActiveCard(id);
+    bool ok = false;
+    const QString content = m_store.load(&ok);
+    if (!ok) {
+        fail(QStringLiteral("load"), m_store.errorString());
+        return;
+    }
+    m_pendingText = content;
+    m_unsaved = false;
+    m_saveTimer.stop();
+    emit currentCardChanged();
+    emit textReloaded(content);
+}
+
+QString Backend::openCard(const QString &id) {
+    if (m_topicWatcher.isRunning())
+        return QStringLiteral("switching topics — try again in a moment");
+    if (!id.isEmpty() && !m_store.cardExists(id))
+        return QStringLiteral("no card ") + id + QStringLiteral(" in this topic");
+    if (id == m_store.activeCard())
+        return QString();
+    QString err;
+    if (!flushForSwitch(&err))
+        return err;
+    activateDocument(id);
+    return QString();
+}
+
+QString Backend::newCard(const QString &fromId, const QString &how) {
+    if (m_topicWatcher.isRunning())
+        return QStringLiteral("switching topics — try again in a moment");
+    QString err;
+    if (!flushForSwitch(&err))
+        return err;
+
+    const QStringList existing = m_store.cardIds();
+    QString id;
+    if (fromId.isEmpty())
+        id = Cards::nextTopLevel(existing);
+    else if (how == QStringLiteral("branch"))
+        id = Cards::branchFrom(fromId, existing);
+    else
+        id = Cards::continueAfter(fromId, existing);
+
+    if (!m_store.createCard(id)) {
+        // The file itself was made, only its commit collided with a
+        // background sync's index lock — same transient case as
+        // attemptCommit(): carry on, and let the retry commit it.
+        if (m_store.cardExists(id) && m_store.errorString().contains(QStringLiteral("index.lock"))) {
+            m_uncommitted = true;
+            m_commitTimer.start(2000);
+        } else {
+            return m_store.errorString();
+        }
+    }
+    activateDocument(id);
+    setStatus(QStringLiteral("new card ") + id);
+    return QString();
+}
+
+QString Backend::followLink(const QString &link) {
+    static const QRegularExpression re(QStringLiteral("^\\[\\[([^\\]:]+):([0-9a-z]+)\\]\\]$"));
+    const QRegularExpressionMatch m = re.match(link.trimmed());
+    if (!m.hasMatch())
+        return QStringLiteral("not a card link: ") + link;
+    const QString topic = m.captured(1);
+    const QString id = m.captured(2);
+
+    if (topic == m_store.currentTopic())
+        return openCard(id);
+
+    if (m_topicWatcher.isRunning())
+        return QStringLiteral("switching topics — try again in a moment");
+    const QString branch = topic == QStringLiteral("main") ? topic : QStringLiteral("topic/") + topic;
+    if (!m_store.topicBranches().contains(branch))
+        return QStringLiteral("no topic named ") + topic;
+    m_cardAfterSwitch = id;
+    requestTopicSwitch(branch);
+    // requestTopicSwitch() can refuse synchronously (still saving) — it
+    // emits topicOpFinished itself in that case, without starting a switch.
+    if (!m_topicWatcher.isRunning()) {
+        m_cardAfterSwitch.clear();
+        return QStringLiteral("still saving — try again in a moment");
+    }
+    return QStringLiteral("switching");
 }
 
 void Backend::copyToClipboard(const QString &text) const {
