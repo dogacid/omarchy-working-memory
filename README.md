@@ -347,6 +347,27 @@ remote. Either way your edits keep saving and committing locally
 regardless, exactly as if no remote were configured at all; a sync just
 hasn't reached `origin` yet and will on the next cycle.
 
+Three things keep a sync from ever fighting your typing:
+
+- **Opening waits for the pull.** When the app opens with a remote
+  configured, the text shows dimmed and read-only, with "getting the latest
+  from your other machines…" in the footer, until that first pull has
+  landed: usually a second or two, and never more than 8 seconds (offline,
+  it lets go straight away). Anything you type meanwhile isn't lost: it's
+  held and dropped in at the cursor the moment the up-to-date text is in.
+- **Changes arriving while you type are merged, not swapped.** If a
+  sync brings in another machine's edit to the note or card you're typing
+  in, the app does a three-way merge of the text both sides started from,
+  your text and theirs (`git merge-file`, with the same keep-both-sides
+  rule as below), so both sets of changes survive and your cursor stays on
+  the text it was on. Autosave also never writes the file while a pull
+  could still be landing in it.
+- **Closing pushes.** Closing the window lets that last save's sync finish
+  in the background (for up to 10 seconds) before the app exits, so the
+  other machine has your latest the next time it opens, rather than only
+  after this machine's next launch. If you reopen within those seconds,
+  the new window waits for the old one to finish first.
+
 None of this is aggressive enough to be a concern for GitHub or any other
 host: it's the same plain `git fetch`/`pull`/`push` any developer runs by
 hand, at a cadence (once per open, once per edit, every 5 minutes at most)

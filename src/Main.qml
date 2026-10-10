@@ -80,6 +80,9 @@ ApplicationWindow {
     // A short message that takes over the footer's status slot for a few
     // seconds — card operations' errors have no overlay of their own.
     property string flashMessage: ""
+    // Typed while backend.syncLocked held the editor at launch; applied at
+    // the cursor the moment the lock lifts, on top of the synced text.
+    property string heldInput: ""
     // The picker's search terms, once a search is running — highlighted in
     // the result list and the preview.
     property var searchWords: []
@@ -542,10 +545,13 @@ ApplicationWindow {
     // Global shortcuts. Ctrl+E (drop to a real editor for selection) is
     // gone entirely now that the editor is a native QQuickTextArea with
     // real shift-arrow/word/mouse selection built in.
-    Shortcut { sequence: "Ctrl+S"; enabled: win.mode === "edit" && !win.topicBusy; onActivated: backend.save() }
-    Shortcut { sequence: "Ctrl+R"; onActivated: win.mode === "edit" ? win.openHistory() : win.backToEdit() }
-    Shortcut { sequence: "Alt+D"; enabled: win.mode === "edit"; onActivated: win.insertDate() }
-    Shortcut { sequence: "Alt+T"; enabled: win.mode === "edit"; onActivated: win.insertDateTime() }
+    // While the launch sync holds the editor (backend.syncLocked), anything
+    // that edits, saves or leaves the open document waits too: each of
+    // those would cut that first sync short or write into stale text.
+    Shortcut { sequence: "Ctrl+S"; enabled: win.mode === "edit" && !win.topicBusy && !backend.syncLocked; onActivated: backend.save() }
+    Shortcut { sequence: "Ctrl+R"; enabled: !backend.syncLocked; onActivated: win.mode === "edit" ? win.openHistory() : win.backToEdit() }
+    Shortcut { sequence: "Alt+D"; enabled: win.mode === "edit" && !backend.syncLocked; onActivated: win.insertDate() }
+    Shortcut { sequence: "Alt+T"; enabled: win.mode === "edit" && !backend.syncLocked; onActivated: win.insertDateTime() }
     Shortcut { sequence: "Ctrl+1"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(1) }
     Shortcut { sequence: "Ctrl+2"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(2) }
     Shortcut { sequence: "Ctrl+3"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(3) }
@@ -557,30 +563,30 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+9"; enabled: win.mode === "edit"; onActivated: win.jumpToHeading(9) }
     Shortcut {
         sequence: "Ctrl+T"
-        enabled: win.mode === "edit" && !win.showHelp && !win.showTopicCreator && !win.topicBusy && backend.lastError === ""
+        enabled: win.mode === "edit" && !win.showHelp && !win.showTopicCreator && !win.topicBusy && !backend.syncLocked && backend.lastError === ""
         onActivated: win.openTopicSwitcher()
     }
     Shortcut {
         sequence: "Ctrl+I"
         enabled: (win.mode === "edit" || win.mode === "cards") && !win.showHelp && !win.showTopicSwitcher
-                 && !win.showTopicCreator && !win.topicBusy && backend.lastError === ""
+                 && !win.showTopicCreator && !win.topicBusy && !backend.syncLocked && backend.lastError === ""
         onActivated: win.mode === "edit" ? win.openCardPicker() : win.backToEdit()
     }
     Shortcut {
         sequence: "Ctrl+Shift+I"
         enabled: win.mode === "edit" && !win.showHelp && !win.showTopicSwitcher
-                 && !win.showTopicCreator && !win.topicBusy && backend.lastError === ""
+                 && !win.showTopicCreator && !win.topicBusy && !backend.syncLocked && backend.lastError === ""
         onActivated: win.newCardFrom(backend.currentCard, "continue")
     }
     Shortcut {
         sequence: "Ctrl+O"
         enabled: win.mode === "edit" && !win.showHelp && !win.showTopicSwitcher
-                 && !win.showTopicCreator && !win.topicBusy && backend.lastError === ""
+                 && !win.showTopicCreator && !win.topicBusy && !backend.syncLocked && backend.lastError === ""
         onActivated: win.jumpBack()
     }
     Shortcut {
         sequence: "Ctrl+Shift+T"
-        enabled: win.mode === "edit" && !win.showHelp && !win.showTopicSwitcher && !win.topicBusy && backend.lastError === ""
+        enabled: win.mode === "edit" && !win.showHelp && !win.showTopicSwitcher && !win.topicBusy && !backend.syncLocked && backend.lastError === ""
         onActivated: win.openTopicCreator()
     }
     // Disabled while visual-selecting: Esc there means "cancel the
@@ -618,6 +624,35 @@ ApplicationWindow {
 
     Connections {
         target: backend
+        // A sync changed the open document (already merged with whatever
+        // was typed meanwhile, in the backend). Keep the cursor on the same
+        // text: in the unchanged lead-in, same offset; in the unchanged
+        // tail, shifted by however much the text grew or shrank.
+        function onTextMerged(text) {
+            const old = editor.text, pos = editor.cursorPosition;
+            let pre = 0;
+            while (pre < old.length && pre < text.length && old[pre] === text[pre]) pre++;
+            let suf = 0;
+            while (suf < old.length - pre && suf < text.length - pre
+                   && old[old.length - 1 - suf] === text[text.length - 1 - suf]) suf++;
+            // At the very end (where the app opens the note) stays at the
+            // end, after anything the sync appended.
+            const newPos = pos === old.length ? text.length
+                : pos <= pre ? pos
+                : pos >= old.length - suf ? pos + (text.length - old.length)
+                : Math.min(pos, text.length);
+            if (win.editorMode === "visual" || win.editorMode === "visualLine") {
+                editor.deselect();
+                win.enterEditorNormalMode();
+            }
+            editor.text = text;
+            editor.cursorPosition = Math.max(0, Math.min(newPos, text.length));
+        }
+        function onSyncLockedChanged() {
+            if (backend.syncLocked || !win.heldInput) return;
+            editor.insert(editor.cursorPosition, win.heldInput);
+            win.heldInput = "";
+        }
         function onTextReloaded(text) {
             editor.text = text;
             editor.cursorPosition = win.pendingCursor >= 0 ? Math.min(win.pendingCursor, text.length) : text.length;
@@ -674,7 +709,25 @@ ApplicationWindow {
                 // is swallowed (event.accepted = true) once out of Insert
                 // mode, recognized or not — an unmapped Normal-mode key
                 // must never fall through and get typed as literal text.
+                readOnly: backend.syncLocked
+                opacity: backend.syncLocked ? 0.55 : 1
+                Behavior on opacity { NumberAnimation { duration: 150 } }
+
                 Keys.onPressed: function (event) {
+                    // Launch sync still running: hold what's typed (the
+                    // field is read-only meanwhile) rather than drop it, and
+                    // apply it once the up-to-date text is in. Shortcuts
+                    // (anything with Ctrl/Alt/Meta) fall through as usual.
+                    if (backend.syncLocked) {
+                        if (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) return;
+                        if (win.editorMode !== "insert") { if (event.key !== Qt.Key_Escape) event.accepted = true; return; }
+                        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) win.heldInput += "\n";
+                        else if (event.key === Qt.Key_Backspace) win.heldInput = win.heldInput.slice(0, -1);
+                        else if (event.text && event.text.charCodeAt(0) >= 32 || event.text === "\t") win.heldInput += event.text;
+                        else return;
+                        event.accepted = true;
+                        return;
+                    }
                     if (win.editorMode === "insert") return;
                     // Every vim command here is a plain, unmodified key —
                     // so anything held with Ctrl/Alt/Meta is never one of
@@ -1159,6 +1212,9 @@ ApplicationWindow {
                     elide: Text.ElideRight
                     text: {
                         if (win.mode === "edit") {
+                            if (backend.syncLocked)
+                                return "getting the latest from your other machines…"
+                                    + (win.heldInput ? "  (" + win.heldInput.length + " typed, will appear in a moment)" : "");
                             if (win.editorMode === "insert")
                                 return "esc vim mode · ctrl+s save · ? help";
                             const label = win.editorMode === "visualLine" ? "VISUAL LINE"

@@ -6,9 +6,11 @@
 #include <QColor>
 #include <QDir>
 #include <QFile>
+#include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QRegularExpression>
 #include <QTextStream>
+#include <QThread>
 #include <QVariantMap>
 #include <QtConcurrent>
 
@@ -23,6 +25,11 @@ constexpr int kCommitDebounceMs = 20000;
 // another machine's changes. 5 minutes balances staying reasonably current
 // against not chattering the remote needlessly.
 constexpr int kPeriodicSyncMs = 5 * 60 * 1000;
+// The most the editor stays locked at launch waiting for the first sync —
+// past this it unlocks anyway, and a late pull is merged in instead.
+constexpr int kStartupLockMs = 8000;
+// The most a closed window's process lingers to finish its push.
+constexpr int kCloseSyncWaitMs = 10000;
 }
 
 Backend::Backend(QObject *parent) : QObject(parent) {
@@ -32,6 +39,10 @@ Backend::Backend(QObject *parent) : QObject(parent) {
     connect(&m_saveTimer, &QTimer::timeout, this, &Backend::onSaveTimeout);
     connect(&m_commitTimer, &QTimer::timeout, this, &Backend::onCommitTimeout);
     connect(&m_periodicSyncTimer, &QTimer::timeout, this, &Backend::periodicCheck);
+    m_unlockTimer.setSingleShot(true);
+    connect(&m_unlockTimer, &QTimer::timeout, this, &Backend::unlockAfterStartup);
+    // Queued: emitted on the sync's worker thread.
+    connect(&m_store, &GitStore::pulled, this, &Backend::onPulled, Qt::QueuedConnection);
     connect(&m_syncWatcher, &QFutureWatcher<GitStore::SyncOutcome>::finished, this, &Backend::onSyncFinished);
     connect(&m_topicWatcher, &QFutureWatcher<QString>::finished, this, &Backend::onTopicOpFinished);
     connect(&m_themeWatcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &) {
@@ -69,6 +80,13 @@ Backend::~Backend() {
         m_topicWatcher.waitForFinished();
     }
     if (m_syncWatcher.isRunning()) {
+        // The window is already gone, so waiting here costs the user
+        // nothing visible: let the sync the closing save() started finish
+        // its push, within a bound, before cancelling whatever's left.
+        QElapsedTimer waited;
+        waited.start();
+        while (m_syncWatcher.isRunning() && waited.elapsed() < kCloseSyncWaitMs)
+            QThread::msleep(50);
         m_store.requestCancelSync();
         m_syncWatcher.waitForFinished();
     }
@@ -86,17 +104,22 @@ bool Backend::start() {
         fail(QStringLiteral("load"), m_store.errorString());
         return false;
     }
+    m_diskText = m_pendingText;
 
     loadOmarchyTheme();
     watchOmarchyTheme();
     setStatus(QStringLiteral("synced"));
 
-    // The window opens immediately with whatever's on disk; any
-    // cross-machine update pulled in behind it lands moments later via the
-    // same textReloaded path history-restore already uses — never worth
-    // delaying the window appearing for.
+    // The window opens immediately with whatever's on disk, but locked
+    // (see syncLocked) until this first sync lands — it may bring days of
+    // another machine's changes, and typing into the stale text meanwhile
+    // is exactly the experience to avoid. No remote, no lock.
     m_periodicSyncTimer.start();
     triggerSync();
+    if (m_syncWatcher.isRunning()) {
+        m_syncLocked = true;
+        m_unlockTimer.start(kStartupLockMs);
+    }
     return true;
 }
 
@@ -114,10 +137,17 @@ void Backend::noteEdited(const QString &text) {
 void Backend::onSaveTimeout() {
     if (!m_unsaved)
         return;
+    // Never write the file while a sync's pull may still be landing in
+    // that very file. The edit stays in m_pendingText; onPulled() (or
+    // processSyncOutcome(), if the pull never happened) restarts this
+    // debounce afterwards.
+    if (m_syncWatcher.isRunning() && !m_syncPulled)
+        return;
     if (!m_store.save(m_pendingText)) {
         fail(QStringLiteral("save"), m_store.errorString());
         return;
     }
+    m_diskText = m_pendingText;
     m_unsaved = false;
     m_uncommitted = true;
     setStatus(QStringLiteral("saved"));
@@ -133,11 +163,13 @@ void Backend::onCommitTimeout() {
 void Backend::save() {
     m_saveTimer.stop();
     m_commitTimer.stop();
+    settleSync();
 
     if (!m_store.save(m_pendingText)) {
         fail(QStringLiteral("save"), m_store.errorString());
         return;
     }
+    m_diskText = m_pendingText;
     m_unsaved = false;
     m_uncommitted = true;
     setStatus(QStringLiteral("saved"));
@@ -189,11 +221,8 @@ void Backend::triggerSync() {
     if (!m_store.hasRemote())
         return;
     setStatus(QStringLiteral("syncing…"));
-    // What the open document looked like going in (on disk and in the
-    // editor alike — the guard above means nothing was unsaved), so
-    // reloadIfChanged() can tell a pull's change from the user's typing.
-    m_syncDoc = m_store.activeCard();
-    m_syncBaseText = m_pendingText;
+    m_syncSettled = false;
+    m_syncPulled = false;
     m_syncWatcher.setFuture(QtConcurrent::run([this] { return m_store.syncWithRemote(); }));
 }
 
@@ -212,8 +241,52 @@ void Backend::periodicCheck() {
     triggerSync();
 }
 
+void Backend::settleSync() {
+    if (!m_syncWatcher.isRunning())
+        return;
+    m_store.requestCancelSync();
+    m_syncWatcher.waitForFinished();
+    m_syncSettled = true;
+    processSyncOutcome(m_syncWatcher.result());
+}
+
 void Backend::onSyncFinished() {
-    const GitStore::SyncOutcome outcome = m_syncWatcher.result();
+    if (m_syncSettled) {
+        m_syncSettled = false;
+        return;
+    }
+    processSyncOutcome(m_syncWatcher.result());
+}
+
+void Backend::onPulled() {
+    // Late delivery for a sync settleSync() already wrapped up: its outcome
+    // (merge included) has been applied.
+    if (m_syncSettled || !m_syncWatcher.isRunning())
+        return;
+    m_syncPulled = true;
+    reloadIfChanged();
+    unlockAfterStartup();
+    if (m_unsaved)
+        m_saveTimer.start(kSaveDebounceMs);
+}
+
+void Backend::unlockAfterStartup() {
+    m_unlockTimer.stop();
+    if (!m_syncLocked)
+        return;
+    m_syncLocked = false;
+    emit syncLockedChanged();
+}
+
+void Backend::processSyncOutcome(const GitStore::SyncOutcome &outcome) {
+    // Whatever happened, the first sync is over: let the editor go. A
+    // guard, so it runs on every return path and after reloadIfChanged()
+    // below — the merged text must reach the editor before the typing held
+    // during the lock is applied on top of it.
+    struct Unlock { Backend *b; ~Unlock() { b->unlockAfterStartup(); } } unlock{this};
+    // Saves were held while the sync ran (see onSaveTimeout()).
+    struct Resave { Backend *b; ~Resave() { if (b->m_unsaved) b->m_saveTimer.start(kSaveDebounceMs); } } resave{this};
+
     if (!outcome.ranSync)
         return; // no remote configured — matches pre-sync behavior exactly
 
@@ -228,38 +301,46 @@ void Backend::onSyncFinished() {
         return;
     }
     if (!outcome.ok) {
+        // Cut short by settleSync() — not a connectivity problem, and the
+        // save/commit that asked for it starts a fresh sync right after.
+        if (outcome.error == QStringLiteral("sync cancelled"))
+            return;
         m_store.logError(outcome.error);
         setStatus(QStringLiteral("offline"));
         return;
     }
-    setStatus(QStringLiteral("synced"));
+    setStatus(m_unsaved ? QStringLiteral("editing…") : QStringLiteral("synced"));
 }
 
 void Backend::reloadIfChanged() {
     bool ok = false;
-    const QString content = m_store.load(&ok);
-    if (!ok || content == m_pendingText)
-        return;
+    const QString disk = m_store.load(&ok);
+    if (!ok || disk == m_diskText)
+        return; // the sync didn't touch the open document
 
-    // Typing that hasn't reached disk yet (the save debounce is still
-    // pending) must never be replaced by the file: a sync takes seconds
-    // against a real remote, and the user can easily have typed — or
-    // switched to a new card and typed — the whole time it ran. Keep the
-    // buffer; the next autosave writes it out. Only if the pull really did
-    // change this same document is anything lost from the live file, and
-    // then only to git history, so say so in the log.
-    if (m_unsaved) {
-        if (m_store.activeCard() == m_syncDoc && content != m_syncBaseText)
-            m_store.logError(QStringLiteral("sync: a remote change to ")
-                + (m_syncDoc.isEmpty() ? QStringLiteral("the note") : QStringLiteral("card ") + m_syncDoc)
-                + QStringLiteral(" arrived while you were typing; kept your text (the remote version is in history)"));
-        return;
+    // The pull changed it. Typing that hasn't reached disk yet — a sync
+    // takes seconds against a real remote, and the user may have typed the
+    // whole time — is merged with the pulled text rather than either side
+    // replacing the other: base is what both started from (m_diskText).
+    QString merged = disk;
+    if (m_pendingText != m_diskText) {
+        bool mergeOk = false;
+        merged = m_store.mergeText(m_diskText, m_pendingText, disk, &mergeOk);
+        if (!mergeOk) {
+            // Can't merge (no temp dir, git missing): keep the typing, the
+            // one thing that exists nowhere else; the pulled version is
+            // still in history.
+            m_store.logError(QStringLiteral("sync: couldn't merge a remote change with your typing (")
+                + m_store.errorString() + QStringLiteral("); kept your text, the remote version is in history"));
+            merged = m_pendingText;
+        }
     }
-
-    m_pendingText = content;
-    m_unsaved = false;
-    m_uncommitted = false;
-    emit textReloaded(content);
+    m_diskText = disk;
+    m_unsaved = (merged != disk);
+    if (merged == m_pendingText)
+        return;
+    m_pendingText = merged;
+    emit textMerged(merged);
 }
 
 void Backend::dismissError() {
@@ -320,6 +401,7 @@ void Backend::restoreAt(const QString &hash, const QString &isoTime) {
     }
 
     m_pendingText = content;
+    m_diskText = content;
     m_unsaved = false;
     m_uncommitted = false;
     m_saveTimer.stop();
@@ -412,6 +494,7 @@ void Backend::applyTopicSwitch() {
         return;
     }
     m_pendingText = content;
+    m_diskText = content;
     m_unsaved = false;
     m_uncommitted = false;
     m_saveTimer.stop();
@@ -590,6 +673,7 @@ void Backend::activateDocument(const QString &id) {
         return;
     }
     m_pendingText = content;
+    m_diskText = content;
     m_unsaved = false;
     m_saveTimer.stop();
     emit currentCardChanged();

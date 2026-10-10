@@ -7,6 +7,9 @@
 #include <QList>
 #include <QMutex>
 #include <atomic>
+#include <memory>
+
+class QLockFile;
 
 // GitStore owns the working-memory text file and the git repo that versions
 // it. Every operation shells out to the real `git` binary (via QProcess) —
@@ -44,11 +47,18 @@ public:
     };
 
     explicit GitStore(QObject *parent = nullptr);
+    ~GitStore() override;
 
     // Resolves the data directory ($OMARCHY_WORKING_MEMORY_DIR, else
     // $XDG_DATA_HOME or ~/.local/share, then /omarchy-working-memory) and
     // ensures the directory, git repo, and note file all exist. Returns
     // false (with errorString() set) if anything about that setup fails.
+    //
+    // Also takes a per-repo instance lock, waiting a while for it: a
+    // previous instance may still be finishing its push after its window
+    // closed (see Backend's destructor), and two processes running git in
+    // one working tree at once is how index.lock collisions and lost
+    // merges happen.
     bool open();
 
     QString path() const { return m_path; }
@@ -96,6 +106,12 @@ public:
     // Case-insensitive; a document matches only if it contains every
     // word, anywhere in it (not necessarily on one line).
     QList<SearchHit> search(const QStringList &words) const;
+    // Three-way merge of plain text with `git merge-file --union`: ours and
+    // theirs both changed base; the result keeps both sides' changes, and
+    // where they touch the same lines keeps both versions of those lines
+    // (no conflict markers) — the same rule the note's own merge driver
+    // uses during a pull.
+    QString mergeText(const QString &base, const QString &ours, const QString &theirs, bool *ok) const;
     // A document's text on another topic's branch (card empty = its note),
     // without checking that branch out.
     QString readDocumentOn(const QString &branch, const QString &card) const;
@@ -160,6 +176,12 @@ public:
     // disables the next.
     void requestCancelSync();
 
+signals:
+    // Emitted from syncWithRemote()'s thread the moment its pull has
+    // landed (or there was nothing to pull), before the push: the working
+    // tree is up to date from here on, so the UI needn't wait for the push.
+    void pulled();
+
 private:
     bool commitWithMessage(const QString &message, bool *committed);
     bool git(const QStringList &args, bool network = false) const;
@@ -195,6 +217,7 @@ private:
     QString cardRelPath(const QString &id) const;
     QString notePath() const;
 
+    std::unique_ptr<QLockFile> m_instanceLock;
     QString m_dir;
     QString m_path;        // absolute path of the active document
     QString m_activeRel;   // the same, relative to m_dir (for git pathspecs)

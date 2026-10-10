@@ -26,11 +26,18 @@ class Backend : public QObject {
     Q_PROPERTY(QString currentTopic READ currentTopic NOTIFY currentTopicChanged)
     // Empty while editing the topic's note, else the open index card's ID.
     Q_PROPERTY(QString currentCard READ currentCard NOTIFY currentCardChanged)
+    // True from launch until the first sync has finished (or ~6s have
+    // passed): the editor holds off applying typing until it has the
+    // latest text, so opening the app and typing straight away never
+    // races days of changes arriving from another machine.
+    Q_PROPERTY(bool syncLocked READ syncLocked NOTIFY syncLockedChanged)
 
 public:
     explicit Backend(QObject *parent = nullptr);
-    // Blocks until any in-flight background sync (see triggerSync()) has
-    // finished — required, not just tidy: main.cpp holds Backend as a stack
+    // Gives an in-flight sync — normally the one the closing save() just
+    // started — up to ~10s to finish pushing, so this machine's last edits
+    // reach the remote now rather than at its next launch; then blocks
+    // until it has finished — required, not just tidy: main.cpp holds Backend as a stack
     // variable, and a sync's worker thread captures `this` in its lambda.
     // Without this, destroying Backend while that thread is still touching
     // m_store is a use-after-free — see the .cpp for how directly this was
@@ -52,6 +59,7 @@ public:
     QString themeMuted() const { return m_themeMuted; }
     QString currentTopic() const { return m_store.currentTopic(); }
     QString currentCard() const { return m_store.activeCard(); }
+    bool syncLocked() const { return m_syncLocked; }
 
     Q_INVOKABLE QString initialText() const;
     Q_INVOKABLE void noteEdited(const QString &text);
@@ -117,6 +125,11 @@ signals:
     void themeChanged();
     void currentTopicChanged();
     void currentCardChanged();
+    void syncLockedChanged();
+    // A sync changed the open document on disk: text is the new content,
+    // already merged with anything typed meanwhile. Unlike textReloaded,
+    // the editor should keep the cursor where it was.
+    void textMerged(const QString &text);
     // Emitted after a restore so the live editor picks up the new text —
     // the editor's text is otherwise never pushed to it from C++, only read
     // from it via noteEdited(), to avoid a binding feedback loop. Also used
@@ -157,7 +170,22 @@ private:
     // that notices and retries the commit instead of just trying to sync
     // around it, so nothing can stay stuck longer than one interval.
     void periodicCheck();
+    // After a sync: if the pull changed the open document, three-way merge
+    // that change with whatever's been typed since (see m_diskText) and
+    // push the result to the editor via textMerged().
     void reloadIfChanged();
+    void processSyncOutcome(const GitStore::SyncOutcome &outcome);
+    // Brings an in-flight sync to an end right now (cancelling it at its
+    // next network call, then waiting) and applies its outcome. Called
+    // before anything writes the open document to disk outside the
+    // autosave debounce (Ctrl+S, card/topic switches, close) — writing
+    // while a pull is landing is how a stale buffer overwrites the pulled
+    // text.
+    void settleSync();
+    void unlockAfterStartup();
+    // GitStore::pulled(), delivered on the UI thread while the push is
+    // still running: merge what arrived and release the launch lock now.
+    void onPulled();
     // Shared tail of requestTopicSwitch()/requestTopicCreate(), run on the
     // UI thread once the background checkout has finished: loads the
     // freshly checked-out branch's content into the live editor and resets
@@ -194,10 +222,18 @@ private:
     // Set by followLink() across topics: the card to open once the branch
     // switch it started has landed (see applyTopicSwitch()).
     QString m_cardAfterSwitch;
-    // The open document and its text when the in-flight sync started — see
-    // reloadIfChanged().
-    QString m_syncDoc;
-    QString m_syncBaseText;
+    // The open document's text as last read from or written to disk — the
+    // common ancestor for merging a pull's change with the editor's
+    // unsaved text in reloadIfChanged().
+    QString m_diskText;
+    // settleSync() already applied the outcome its waitForFinished() got;
+    // the watcher's queued finished() for that same sync is then ignored.
+    bool m_syncSettled = false;
+    // The running sync's pull is done (see onPulled()): the file is safe
+    // to write again even though the sync itself hasn't finished.
+    bool m_syncPulled = false;
+    bool m_syncLocked = false;
+    QTimer m_unlockTimer;
 
     bool m_darkMode = true;
     QString m_themeBackground;

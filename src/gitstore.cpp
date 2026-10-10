@@ -5,12 +5,14 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QLockFile>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QSaveFile>
 #include <QSet>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QTemporaryDir>
 #include <QTextStream>
 
 #include <algorithm>
@@ -24,6 +26,8 @@ constexpr auto kCardsDir = "cards";
 }
 
 GitStore::GitStore(QObject *parent) : QObject(parent) {}
+
+GitStore::~GitStore() = default;
 
 bool GitStore::open() {
     const QString override = qEnvironmentVariable("OMARCHY_WORKING_MEMORY_DIR");
@@ -62,6 +66,17 @@ bool GitStore::open() {
         const QString branch = currentBranch(&ok);
         if (ok && branch == QStringLiteral("master"))
             ensureBranch(QLatin1String(kBranch));
+    }
+
+    // Inside .git, so the lock file is never something git could track.
+    // Waits rather than failing outright: the usual holder is an instance
+    // whose window just closed and which is finishing its push, which
+    // takes seconds at most. A crashed holder is detected by its PID.
+    m_instanceLock = std::make_unique<QLockFile>(m_dir + QStringLiteral("/.git/omarchy-working-memory.lock"));
+    m_instanceLock->setStaleLockTime(0);
+    if (!m_instanceLock->tryLock(15000)) {
+        setError(QStringLiteral("another omarchy-working-memory is still running (or still finishing its sync) on ") + m_dir);
+        return false;
     }
 
     if (!QFile::exists(m_path)) {
@@ -393,6 +408,30 @@ QList<GitStore::SearchHit> GitStore::search(const QStringList &words) const {
     return hits;
 }
 
+QString GitStore::mergeText(const QString &base, const QString &ours, const QString &theirs, bool *ok) const {
+    *ok = false;
+    QTemporaryDir tmp;
+    if (!tmp.isValid()) {
+        setError(QStringLiteral("merge: no temp dir"));
+        return QString();
+    }
+    const QStringList names{QStringLiteral("ours"), QStringLiteral("base"), QStringLiteral("theirs")};
+    const QStringList texts{ours, base, theirs};
+    QStringList paths;
+    for (int i = 0; i < 3; ++i) {
+        QFile f(tmp.filePath(names.at(i)));
+        if (!f.open(QIODevice::WriteOnly)) {
+            setError(QStringLiteral("merge: ") + f.errorString());
+            return QString();
+        }
+        f.write(texts.at(i).toUtf8());
+        paths << f.fileName();
+    }
+    const QString out = gitOutput({QStringLiteral("merge-file"), QStringLiteral("-p"), QStringLiteral("--union"),
+                                   paths.at(0), paths.at(1), paths.at(2)}, ok);
+    return out;
+}
+
 QString GitStore::readDocumentOn(const QString &branch, const QString &card) const {
     const QString ref = localBranchExists(branch) ? branch : QStringLiteral("origin/") + branch;
     const QString path = card.isEmpty() ? QString(QLatin1String(kFileName)) : cardRelPath(card);
@@ -583,6 +622,7 @@ GitStore::SyncOutcome GitStore::syncWithRemote() {
         outcome.error = errorString();
         return outcome;
     }
+    emit pulled();
     if (!pushToRemote()) {
         outcome.error = errorString();
         return outcome;
