@@ -12,6 +12,8 @@
 #include <QVariantMap>
 #include <QtConcurrent>
 
+#include <algorithm>
+
 namespace {
 constexpr int kSaveDebounceMs = 1000;
 constexpr int kCommitDebounceMs = 20000;
@@ -439,6 +441,7 @@ QVariantList Backend::cardList() const {
 
     QVariantMap note;
     note[QStringLiteral("id")] = QString();
+    note[QStringLiteral("topic")] = m_store.currentTopic();
     note[QStringLiteral("title")] = firstLine(m_store.readDocument(QString()));
     note[QStringLiteral("time")] = QString();
     note[QStringLiteral("depth")] = 0;
@@ -449,6 +452,7 @@ QVariantList Backend::cardList() const {
     for (const QString &id : m_store.cardIds()) {
         QVariantMap m;
         m[QStringLiteral("id")] = id;
+        m[QStringLiteral("topic")] = m_store.currentTopic();
         m[QStringLiteral("title")] = firstLine(m_store.readDocument(id));
         m[QStringLiteral("time")] = times.value(id).toString(QStringLiteral("yyyy-MM-dd HH:mm"));
         m[QStringLiteral("depth")] = Cards::depth(id);
@@ -458,7 +462,102 @@ QVariantList Backend::cardList() const {
     return out;
 }
 
-QString Backend::cardContent(const QString &id) const {
+namespace {
+QString topicBranch(const QString &topic) {
+    return topic == QStringLiteral("main") ? topic : QStringLiteral("topic/") + topic;
+}
+
+bool containsAll(const QString &text, const QStringList &words) {
+    for (const QString &w : words) {
+        if (!text.contains(w, Qt::CaseInsensitive))
+            return false;
+    }
+    return true;
+}
+
+// The matched line, trimmed and cut down to a window around the first
+// word that appears in it, so the match itself is always visible in the
+// picker's narrow list rather than elided off the end.
+QString snippet(const QString &line, const QStringList &words) {
+    const QString t = line.simplified();
+    int at = -1;
+    for (const QString &w : words) {
+        const int i = t.indexOf(w, 0, Qt::CaseInsensitive);
+        if (i >= 0 && (at < 0 || i < at))
+            at = i;
+    }
+    constexpr int before = 24, total = 120;
+    QString out = t;
+    if (at > before)
+        out = QStringLiteral("…") + t.mid(at - before);
+    if (out.size() > total)
+        out = out.left(total) + QStringLiteral("…");
+    return out;
+}
+
+// First line of text that contains any of words.
+QString matchingLine(const QString &text, const QStringList &words) {
+    for (const QString &line : text.split(QLatin1Char('\n'))) {
+        for (const QString &w : words) {
+            if (line.contains(w, Qt::CaseInsensitive))
+                return line;
+        }
+    }
+    return QString();
+}
+}
+
+QVariantList Backend::searchCards(const QString &query) const {
+    const QStringList words = query.simplified().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    if (words.isEmpty())
+        return {};
+
+    const QString currentTopic = m_store.currentTopic();
+    const QString currentBranch = topicBranch(currentTopic);
+    const QString active = m_store.activeCard();
+
+    struct Row { QString topic; QString card; QString line; };
+    QList<Row> rows;
+    for (const GitStore::SearchHit &h : m_store.search(words)) {
+        // The open document is judged on the editor's text below instead,
+        // which can be ahead of what's on disk.
+        if (h.branch == currentBranch && h.card == active)
+            continue;
+        const QString topic = h.branch == QStringLiteral("main") ? h.branch : h.branch.mid(6);
+        rows.append({topic, h.card, h.line});
+    }
+    if (containsAll(m_pendingText, words))
+        rows.append({currentTopic, active, matchingLine(m_pendingText, words)});
+
+    std::sort(rows.begin(), rows.end(), [&](const Row &a, const Row &b) {
+        if (a.topic != b.topic) {
+            if (a.topic == currentTopic || b.topic == currentTopic)
+                return a.topic == currentTopic;
+            return a.topic < b.topic;
+        }
+        if (a.card.isEmpty() || b.card.isEmpty())
+            return a.card.isEmpty() && !b.card.isEmpty();
+        return Cards::lessThan(a.card, b.card);
+    });
+
+    QVariantList out;
+    for (const Row &r : rows) {
+        QVariantMap m;
+        m[QStringLiteral("id")] = r.card;
+        m[QStringLiteral("topic")] = r.topic;
+        m[QStringLiteral("title")] = snippet(r.line, words);
+        m[QStringLiteral("time")] = QString();
+        m[QStringLiteral("depth")] = 0;
+        m[QStringLiteral("current")] = (r.topic == currentTopic && r.card == active);
+        m[QStringLiteral("other")] = (r.topic != currentTopic);
+        out.append(m);
+    }
+    return out;
+}
+
+QString Backend::cardContent(const QString &id, const QString &topic) const {
+    if (!topic.isEmpty() && topic != m_store.currentTopic())
+        return m_store.readDocumentOn(topicBranch(topic), id);
     // The open document's freshest text is in memory, not necessarily on
     // disk yet (the save debounce may not have fired).
     if (id == m_store.activeCard())
@@ -556,7 +655,7 @@ QString Backend::followLink(const QString &link) {
 
     if (m_topicWatcher.isRunning())
         return QStringLiteral("switching topics — try again in a moment");
-    const QString branch = topic == QStringLiteral("main") ? topic : QStringLiteral("topic/") + topic;
+    const QString branch = topicBranch(topic);
     if (!m_store.topicBranches().contains(branch))
         return QStringLiteral("no topic named ") + topic;
     m_cardAfterSwitch = id;

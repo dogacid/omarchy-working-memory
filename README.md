@@ -236,8 +236,20 @@ card's text on the right.
 | `y`               | Copy the link to the clipboard |
 | `c`               | New card after the highlighted one (same rule as `Ctrl+Shift+I`) |
 | `b`               | New branch off the highlighted one (always a child) |
-| `/`               | Search by number prefix or text |
+| `/`               | Search every topic (see below) |
 | `Esc` / `Ctrl+I`  | Back to the editor |
+
+Search (`/`) covers the full text of every card and every topic note, in
+all topics, not just the one you're in. Every word you type has to appear
+somewhere in a card, in any case and on any line, so `wire dangle` finds a
+card mentioning both. Each result shows the line it matched with your words
+highlighted, labelled with its topic when it's from another one, and the
+preview scrolls to the first match. Typing the start of a card number
+(`1a`) also lists those cards in the current topic. `Enter` opens the
+highlighted result, switching topic if it's elsewhere (`Ctrl+O` comes back);
+`↓` moves into the list so you can press `l` or `y` on a result instead.
+Other topics are searched as of their last commit, which is at most ~20
+seconds behind what you typed there.
 
 A link looks like `[[topic:1a2]]` (e.g. `[[main:3]]`). It always names the
 topic, so it still works after being copied into another topic. In vim

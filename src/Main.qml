@@ -80,6 +80,9 @@ ApplicationWindow {
     // A short message that takes over the footer's status slot for a few
     // seconds — card operations' errors have no overlay of their own.
     property string flashMessage: ""
+    // The picker's search terms, once a search is running — highlighted in
+    // the result list and the preview.
+    property var searchWords: []
 
     onClosing: backend.save()
 
@@ -357,20 +360,61 @@ ApplicationWindow {
         win.showSelectedCard();
         cardListView.forceActiveFocus();
     }
+    // Search: every word must appear somewhere in a card (or topic note),
+    // in any topic — see backend.searchCards(). A word that's also the
+    // start of a card number in this topic (e.g. "1a") lists those cards
+    // too, ahead of the text matches. Runs shortly after typing pauses
+    // (searchTimer), since each search shells out to git.
     function filterCards(query) {
-        const q = query.toLowerCase();
-        win.filteredCards = q
-            ? win.cardEntries.filter(function (c) {
-                return c.id.indexOf(q) === 0 || c.title.toLowerCase().indexOf(q) !== -1;
-              })
-            : win.cardEntries;
+        const q = query.trim().toLowerCase();
+        if (!q) {
+            win.searchWords = [];
+            win.filteredCards = win.cardEntries;
+        } else {
+            win.searchWords = q.split(/\s+/);
+            const byNumber = win.cardEntries.filter(function (c) { return c.id !== "" && c.id.indexOf(q) === 0; });
+            const seen = {};
+            for (const c of byNumber) seen[c.topic + ":" + c.id] = true;
+            win.filteredCards = byNumber.concat(backend.searchCards(q).filter(function (c) {
+                return !seen[c.topic + ":" + c.id];
+            }));
+        }
         cardListView.currentIndex = win.filteredCards.length > 0 ? 0 : -1;
         win.showSelectedCard();
     }
     function showSelectedCard() {
         const c = cardListView.currentIndex >= 0 ? win.filteredCards[cardListView.currentIndex] : null;
         win.selectedCard = c;
-        win.cardPreview = c ? backend.cardContent(c.id) : "";
+        win.cardPreview = c ? backend.cardContent(c.id, c.topic) : "";
+        cardPreviewArea.deselect();
+        cardPreviewArea.cursorPosition = 0;
+        // Scroll the preview to the first hit and select it, so the match
+        // is on screen even deep inside a long card.
+        if (c && win.searchWords.length > 0) {
+            const lower = win.cardPreview.toLowerCase();
+            let at = -1, len = 0;
+            for (const w of win.searchWords) {
+                const i = lower.indexOf(w);
+                if (i >= 0 && (at < 0 || i < at)) { at = i; len = w.length; }
+            }
+            if (at >= 0) cardPreviewArea.select(at, at + len);
+        }
+    }
+    // Rich text for a result row: the row's text, HTML-escaped, with every
+    // search word picked out in the accent colour.
+    function highlightMatches(text) {
+        const esc = function (t) { return t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); };
+        const html = esc(text);
+        if (win.searchWords.length === 0) return html;
+        const pattern = win.searchWords.map(function (w) {
+            return esc(w).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        }).join("|");
+        return html.replace(new RegExp(pattern, "gi"), function (m) {
+            return "<b><font color=\"" + backend.themeAccent + "\">" + m + "</font></b>";
+        });
+    }
+    function cardLinkFor(c) {
+        return "[[" + c.topic + ":" + c.id + "]]";
     }
     function pushJump() {
         const stack = win.jumpStack.slice();
@@ -380,6 +424,27 @@ ApplicationWindow {
     }
     function pickerOpenSelected() {
         if (!win.selectedCard) return;
+        const c = win.selectedCard;
+        // A search hit from another topic: switch topic in the background
+        // (like following a link), straight to the card or the note.
+        if (c.other) {
+            if (win.topicBusy) return;
+            win.pushJump();
+            win.topicBusy = true;
+            if (c.id) {
+                const err = backend.followLink(win.cardLinkFor(c));
+                if (err !== "switching") {
+                    win.topicBusy = false;
+                    win.jumpStack = win.jumpStack.slice(0, -1);
+                    if (err) win.flash(err);
+                    return;
+                }
+            } else {
+                backend.requestTopicSwitch(c.topic === "main" ? "main" : "topic/" + c.topic);
+            }
+            win.backToEdit();
+            return;
+        }
         if (win.selectedCard.id !== backend.currentCard) win.pushJump();
         const err = backend.openCard(win.selectedCard.id);
         if (err) { win.flash(err); return; }
@@ -389,6 +454,10 @@ ApplicationWindow {
     // "continue" from whatever's open).
     function newCardFrom(fromId, how) {
         if (win.topicBusy) return;
+        if (win.mode === "cards" && win.selectedCard && win.selectedCard.other) {
+            win.flash("that card is in " + win.selectedCard.topic + " — open it first, then add cards there");
+            return;
+        }
         win.pushJump();
         const err = backend.newCard(fromId, how);
         if (err) { win.flash(err); return; }
@@ -398,7 +467,7 @@ ApplicationWindow {
     // from, exactly where its cursor was, and go back to it.
     function pickerInsertLink() {
         if (!win.selectedCard || win.selectedCard.id === "") return;
-        const link = backend.cardLink(win.selectedCard.id);
+        const link = win.cardLinkFor(win.selectedCard);
         const pos = editor.cursorPosition;
         editor.insert(pos, link);
         win.backToEdit();
@@ -406,8 +475,8 @@ ApplicationWindow {
     }
     function pickerYankLink() {
         if (!win.selectedCard || win.selectedCard.id === "") return;
-        backend.copyToClipboard(backend.cardLink(win.selectedCard.id));
-        win.flash("copied " + backend.cardLink(win.selectedCard.id));
+        backend.copyToClipboard(win.cardLinkFor(win.selectedCard));
+        win.flash("copied " + win.cardLinkFor(win.selectedCard));
     }
 
     // The [[topic:id]] link the cursor is on, if any — the cursor counts as
@@ -461,6 +530,14 @@ ApplicationWindow {
     }
 
     Timer { id: flashTimer; interval: 4000; onTriggered: win.flashMessage = "" }
+
+    // Run a search that's still waiting on its typing pause right now, so
+    // Enter / ↓ straight after typing act on its results, not stale ones.
+    function flushSearch() {
+        if (!searchTimer.running) return;
+        searchTimer.stop();
+        win.filterCards(cardSearch.text);
+    }
 
     // Global shortcuts. Ctrl+E (drop to a real editor for selection) is
     // gone entirely now that the editor is a native QQuickTextArea with
@@ -530,6 +607,7 @@ ApplicationWindow {
             if (error) {
                 if (win.showTopicSwitcher) win.topicSwitchError = error;
                 else if (win.showTopicCreator) win.topicCreateError = error;
+                else win.flash(error); // a link, a search hit, or Ctrl+O
                 return;
             }
             win.showTopicSwitcher = false;
@@ -907,15 +985,19 @@ ApplicationWindow {
                 TextField {
                     id: cardSearch
                     Layout.fillWidth: true
-                    placeholderText: "Search cards (number or text)…"
+                    placeholderText: "Search every topic (words, or a card number)…"
                     color: backend.themeForeground
                     placeholderTextColor: backend.themeMuted
                     background: Rectangle { color: backend.themeSelection }
-                    onTextChanged: win.filterCards(text)
-                    Keys.onDownPressed: cardListView.forceActiveFocus()
+                    onTextChanged: searchTimer.restart()
+                    Keys.onDownPressed: { win.flushSearch(); cardListView.forceActiveFocus(); }
                     Keys.onEscapePressed: cardListView.forceActiveFocus()
-                    Keys.onReturnPressed: cardListView.forceActiveFocus()
-                    Keys.onEnterPressed: cardListView.forceActiveFocus()
+                    // Enter opens the top (or highlighted) hit directly;
+                    // ↓ moves into the list instead, for l / y on a hit.
+                    Keys.onReturnPressed: { win.flushSearch(); win.pickerOpenSelected(); }
+                    Keys.onEnterPressed: { win.flushSearch(); win.pickerOpenSelected(); }
+
+                    Timer { id: searchTimer; interval: 150; onTriggered: win.filterCards(cardSearch.text) }
                 }
 
                 ListView {
@@ -977,11 +1059,21 @@ ApplicationWindow {
                                     font.bold: true
                                     font.italic: modelData.id === ""
                                 }
-                                Text { text: modelData.time; color: backend.themeMuted; font.pixelSize: 11 }
+                                Text { text: modelData.time; color: backend.themeMuted; font.pixelSize: 11; visible: !modelData.other }
+                                Text {
+                                    visible: !!modelData.other
+                                    text: "in " + modelData.topic
+                                    color: backend.themeBackground
+                                    font.pixelSize: 11
+                                    font.bold: true
+                                    leftPadding: 5; rightPadding: 5; topPadding: 1; bottomPadding: 1
+                                    Rectangle { anchors.fill: parent; z: -1; radius: 3; color: backend.themeAccent }
+                                }
                                 Text { text: modelData.current ? "●" : ""; color: backend.themeAccent; font.pixelSize: 11 }
                             }
                             Text {
-                                text: modelData.title || "(empty)"
+                                text: modelData.title ? win.highlightMatches(modelData.title) : "(empty)"
+                                textFormat: Text.StyledText
                                 color: modelData.title ? backend.themeForeground : backend.themeMuted
                                 elide: Text.ElideRight
                                 width: parent.width - parent.leftPadding
@@ -1014,8 +1106,10 @@ ApplicationWindow {
                         font.bold: true
                         elide: Text.ElideRight
                         text: !win.selectedCard ? ""
-                            : win.selectedCard.id === "" ? backend.currentTopic + " — topic note"
-                            : "Card " + win.selectedCard.id + "  ·  " + win.selectedCard.time
+                            : win.selectedCard.id === "" ? win.selectedCard.topic + " — topic note"
+                            : "Card " + win.selectedCard.id
+                              + (win.selectedCard.other ? "  ·  in " + win.selectedCard.topic
+                                 : win.selectedCard.time ? "  ·  " + win.selectedCard.time : "")
                     }
                 }
 
@@ -1024,15 +1118,19 @@ ApplicationWindow {
                     Layout.fillHeight: true
 
                     TextArea {
+                        id: cardPreviewArea
                         readOnly: true
                         selectByMouse: true
+                        persistentSelection: true
                         wrapMode: TextArea.Wrap
                         text: win.cardPreview
                         font.family: "monospace"
                         font.pixelSize: 15
                         color: backend.themeForeground
-                        selectionColor: backend.themeSelection
-                        selectedTextColor: backend.themeForeground
+                        // Accent, not the usual subtle selection tint: the
+                        // selection here is mostly the search hit.
+                        selectionColor: backend.themeAccent
+                        selectedTextColor: backend.themeBackground
                         background: Rectangle { color: Qt.darker(backend.themeBackground, 1.08) }
                         topPadding: 12
                         leftPadding: 16
@@ -1069,7 +1167,7 @@ ApplicationWindow {
                             return "-- " + label + " --" + pending + "   ?  help";
                         }
                         if (win.mode === "cards")
-                            return "j/k move · enter open · l link here · y copy link · c new after · b branch · / search · esc back";
+                            return "j/k move · enter open · l link here · y copy link · c new after · b branch · / search all topics · esc back";
                         if (win.previewSelMode !== "none")
                             return "h/j/k/l move · gg/G top/bottom · y/ctrl+c/super+c yank · esc cancel"
                                 + (win.previewPendingG ? "   g" : "");

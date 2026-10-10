@@ -28,6 +28,14 @@ public:
         QString message;
     };
 
+    // One document a search matched: the topic's note (card empty) or one
+    // of its cards, with the first line that matched.
+    struct SearchHit {
+        QString branch; // "main" or "topic/<slug>"
+        QString card;   // empty for the topic note
+        QString line;
+    };
+
     struct SyncOutcome {
         bool ranSync = false;  // false if no remote is configured — a no-op
         bool ok = false;
@@ -80,6 +88,17 @@ public:
     // Writes an empty cards/<id>.txt and commits it. Fails rather than
     // overwriting if the card already exists.
     bool createCard(const QString &id);
+
+    // Full-text search of every topic's note and cards at once, via a
+    // single `git grep`: the current topic from its working tree (so saved
+    // but not-yet-committed edits count), every other topic from its
+    // latest commit — including topics only known from origin so far.
+    // Case-insensitive; a document matches only if it contains every
+    // word, anywhere in it (not necessarily on one line).
+    QList<SearchHit> search(const QStringList &words) const;
+    // A document's text on another topic's branch (card empty = its note),
+    // without checking that branch out.
+    QString readDocumentOn(const QString &branch, const QString &card) const;
 
     QList<Commit> log(bool *ok = nullptr) const;
     QString showAt(const QString &hash, bool *ok = nullptr) const;

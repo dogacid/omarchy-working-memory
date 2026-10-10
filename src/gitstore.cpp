@@ -312,6 +312,95 @@ QHash<QString, QDateTime> GitStore::cardCreatedTimes() const {
     return times;
 }
 
+namespace {
+// Which document a repo path is: the note ("working-memory.txt" -> card
+// "") or a card ("cards/1a.txt" -> "1a"). False for anything else.
+bool documentCard(const QString &path, QString *card) {
+    if (path == QLatin1String(kFileName)) {
+        card->clear();
+        return true;
+    }
+    const QString prefix = QLatin1String(kCardsDir) + QLatin1Char('/');
+    if (!path.startsWith(prefix) || !path.endsWith(QStringLiteral(".txt")))
+        return false;
+    *card = path.mid(prefix.size()).chopped(4);
+    return Cards::isValidId(*card);
+}
+}
+
+QList<GitStore::SearchHit> GitStore::search(const QStringList &words) const {
+    QList<SearchHit> hits;
+    if (words.isEmpty())
+        return hits;
+
+    bool ok = false;
+    const QString current = currentBranch(&ok);
+
+    // Every other topic, by whichever ref has it: the local branch if
+    // there is one, else the remote-tracking one.
+    QStringList refs;
+    QHash<QString, QString> branchOfRef;
+    for (const QString &branch : topicBranches()) {
+        if (branch == current)
+            continue;
+        const QString ref = localBranchExists(branch) ? branch : QStringLiteral("origin/") + branch;
+        refs.append(ref);
+        branchOfRef.insert(ref, branch);
+    }
+
+    QStringList patterns;
+    for (const QString &w : words)
+        patterns << QStringLiteral("-e") << w;
+    const QStringList common{QStringLiteral("grep"), QStringLiteral("-I"), QStringLiteral("-i"), QStringLiteral("-F"),
+                             QStringLiteral("--all-match"), QStringLiteral("--no-color")};
+    const QStringList paths{QStringLiteral("--"), QLatin1String(kFileName), QLatin1String(kCardsDir)};
+
+    // Output lines are "[<ref>:]<path>:<text>". Each document's first
+    // matching line becomes its hit; later lines from it are skipped.
+    QSet<QString> seen;
+    auto collect = [&](const QString &out, bool withRef) {
+        for (const QString &raw : out.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+            QString rest = raw;
+            QString branch = current;
+            if (withRef) {
+                const int c = rest.indexOf(QLatin1Char(':'));
+                if (c < 0)
+                    continue;
+                branch = branchOfRef.value(rest.left(c));
+                rest = rest.mid(c + 1);
+                if (branch.isEmpty())
+                    continue;
+            }
+            const int c = rest.indexOf(QLatin1Char(':'));
+            if (c < 0)
+                continue;
+            QString card;
+            if (!documentCard(rest.left(c), &card))
+                continue;
+            const QString key = branch + QLatin1Char('\x1f') + card;
+            if (seen.contains(key))
+                continue;
+            seen.insert(key);
+            hits.append({branch, card, rest.mid(c + 1)});
+        }
+    };
+
+    // git grep exits 1 for "no matches" — not an error, just nothing to
+    // collect, which an empty output already says.
+    collect(gitOutput(common + patterns + paths, &ok), false);
+    if (!refs.isEmpty())
+        collect(gitOutput(common + patterns + refs + paths, &ok), true);
+    return hits;
+}
+
+QString GitStore::readDocumentOn(const QString &branch, const QString &card) const {
+    const QString ref = localBranchExists(branch) ? branch : QStringLiteral("origin/") + branch;
+    const QString path = card.isEmpty() ? QString(QLatin1String(kFileName)) : cardRelPath(card);
+    bool ok = false;
+    const QString out = gitOutput({QStringLiteral("show"), ref + QLatin1Char(':') + path}, &ok);
+    return ok ? out : QString();
+}
+
 bool GitStore::createCard(const QString &id) {
     if (!Cards::isValidId(id)) {
         setError(QStringLiteral("invalid card number: ") + id);

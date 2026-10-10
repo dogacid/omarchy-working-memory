@@ -82,8 +82,15 @@ public:
     // {id, title, time, depth, current} per entry for the Ctrl+I picker:
     // the topic note first (id ""), then every card in slip-box order.
     Q_INVOKABLE QVariantList cardList() const;
-    // A card's (or, for "", the note's) text, for the picker's preview.
-    Q_INVOKABLE QString cardContent(const QString &id) const;
+    // A card's (or, for "", the note's) text, for the picker's preview —
+    // from another topic too, when topic names one other than the current.
+    Q_INVOKABLE QString cardContent(const QString &id, const QString &topic = QString()) const;
+    // Full-text search across every topic's note and cards (see
+    // GitStore::search()): {id, topic, title, time, depth, current, other}
+    // per match, title being the line that matched. The current topic's
+    // matches come first, then the other topics', alphabetically; each
+    // topic's in slip-box order, its note first.
+    Q_INVOKABLE QVariantList searchCards(const QString &query) const;
     // The text inserted by the picker's "l": [[<topic>:<id>]], always
     // naming the topic so the link still resolves once copied elsewhere.
     Q_INVOKABLE QString cardLink(const QString &id) const;
