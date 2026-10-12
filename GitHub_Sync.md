@@ -64,6 +64,15 @@ carries the key alone — these instructions are the documentation for it.
 
 ### B. Per machine: install the key
 
+**On macOS, run `macos/setup-sync.sh`** (after opening Working Memory once,
+so its data repo exists). It does steps 1–4 below and checks each one,
+including write access. It's safe to rerun. The steps are the same by hand
+on Linux.
+
+All four steps are needed. Without a remote (step 3) the app simply doesn't
+sync, and the footer still reads `synced`, so nothing tells you a step is
+missing.
+
 **1. Pull the private key out of 1Password.** No passphrase — it has to
 authenticate with nobody present to type one:
 
@@ -132,6 +141,7 @@ To confirm *write* access specifically, `git push --dry-run origin main` from
 the data repo: a read-only deploy key is refused at this point, so reaching
 "Everything up-to-date" means the push path works.
 
-That's it — no app restart needed. The next autosave commit (or `Ctrl+S`)
-will push through the new key, and the footer status should read `synced`
-instead of `offline`.
+That's it — no app restart needed. The next autosave commit (or `Ctrl+S`,
+`Cmd+S` on macOS) will pull and push through the new key. The footer reads
+`syncing…` while that runs and `offline` if it fails, with the reason in
+`error.log`.
