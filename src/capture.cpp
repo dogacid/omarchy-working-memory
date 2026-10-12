@@ -25,6 +25,13 @@ QString dataDir() {
 
 QString socketPath(const QString &dir) {
     QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
+#ifdef Q_OS_MACOS
+    // No XDG_RUNTIME_DIR, and $TMPDIR isn't guaranteed to reach a process
+    // the browser starts, so the app and the native host could disagree:
+    // use a fixed per-user directory both can work out from $HOME alone.
+    if (runtime.isEmpty())
+        runtime = QDir::homePath() + QStringLiteral("/Library/Caches");
+#endif
     if (runtime.isEmpty())
         runtime = QDir::tempPath();
     const QByteArray hash = QCryptographicHash::hash(QDir(dir).absolutePath().toUtf8(), QCryptographicHash::Sha1).toHex().left(12);

@@ -140,6 +140,15 @@ bool Backend::start() {
     return true;
 }
 
+void Backend::windowReopened() {
+    triggerSync();
+    if (m_syncWatcher.isRunning() && !m_syncLocked) {
+        m_syncLocked = true;
+        emit syncLockedChanged();
+        m_unlockTimer.start(kStartupLockMs);
+    }
+}
+
 QString Backend::initialText() const {
     return m_pendingText;
 }

@@ -98,6 +98,21 @@ ApplicationWindow {
     property bool pendingInboxD: false
 
     onClosing: backend.save()
+    // macOS keeps the app running with the window hidden (see macos.h), so
+    // reopening it lands here rather than in a fresh Component.onCompleted.
+    onVisibleChanged: if (visible && mode === "edit") editor.forceActiveFocus()
+
+    // On macOS Qt maps "Ctrl" in a shortcut sequence to Cmd, so the
+    // Shortcuts below need no changes — only the labels that spell them out.
+    readonly property bool isMac: Qt.platform.os === "osx"
+    readonly property string monoFont: isMac ? "Menlo" : "monospace"
+    function keyLabel(s) {
+        if (!isMac) return s;
+        return s.replace(/\/super\+c/g, "")
+                .replace(/Ctrl\+Shift\+/g, "⇧⌘").replace(/ctrl\+shift\+/g, "⇧⌘")
+                .replace(/Ctrl\+/g, "⌘").replace(/ctrl\+/g, "⌘")
+                .replace(/Alt\+/g, "⌥");
+    }
 
     function openHistory() {
         historyEntries = backend.historyEntries();
@@ -618,6 +633,9 @@ ApplicationWindow {
     // While the launch sync holds the editor (backend.syncLocked), anything
     // that edits, saves or leaves the open document waits too: each of
     // those would cut that first sync short or write into stale text.
+    // Linux closes the window from the compositor (Super+W); macOS needs the
+    // app to do it.
+    Shortcut { sequence: StandardKey.Close; enabled: win.isMac; onActivated: win.close() }
     Shortcut { sequence: "Ctrl+S"; enabled: win.mode === "edit" && !win.topicBusy && !backend.syncLocked; onActivated: backend.save() }
     Shortcut { sequence: "Ctrl+R"; enabled: !backend.syncLocked; onActivated: win.mode === "edit" ? win.openHistory() : win.backToEdit() }
     Shortcut { sequence: "Alt+D"; enabled: win.mode === "edit" && !backend.syncLocked; onActivated: win.insertDate() }
@@ -757,7 +775,7 @@ ApplicationWindow {
                 wrapMode: TextArea.Wrap
                 selectByMouse: true
                 persistentSelection: true
-                font.family: "monospace"
+                font.family: win.monoFont
                 font.pixelSize: 15
                 color: backend.themeForeground
                 selectionColor: backend.themeSelection
@@ -1021,7 +1039,7 @@ ApplicationWindow {
                         persistentSelection: true
                         wrapMode: TextArea.Wrap
                         text: win.historyContent
-                        font.family: "monospace"
+                        font.family: win.monoFont
                         font.pixelSize: 15
                         color: backend.themeForeground
                         selectionColor: backend.themeSelection
@@ -1189,7 +1207,7 @@ ApplicationWindow {
                     selectByMouse: true
                     wrapMode: TextArea.Wrap
                     text: win.selectedInbox ? win.selectedInbox.text : ""
-                    font.family: "monospace"
+                    font.family: win.monoFont
                     font.pixelSize: 15
                     color: backend.themeForeground
                     selectionColor: backend.themeSelection
@@ -1299,7 +1317,7 @@ ApplicationWindow {
                                 Text {
                                     text: modelData.id === "" ? "note" : modelData.id
                                     color: modelData.id === "" ? backend.themeMuted : backend.themeAccent
-                                    font.family: "monospace"
+                                    font.family: win.monoFont
                                     font.bold: true
                                     font.italic: modelData.id === ""
                                 }
@@ -1373,7 +1391,7 @@ ApplicationWindow {
                         persistentSelection: true
                         wrapMode: TextArea.Wrap
                         text: win.cardPreview
-                        font.family: "monospace"
+                        font.family: win.monoFont
                         font.pixelSize: 15
                         color: backend.themeForeground
                         // Accent, not the usual subtle selection tint: the
@@ -1412,7 +1430,7 @@ ApplicationWindow {
                                 return "getting the latest from your other machines…"
                                     + (win.heldInput ? "  (" + win.heldInput.length + " typed, will appear in a moment)" : "");
                             if (win.editorMode === "insert")
-                                return "esc vim mode · ctrl+s save · ? help";
+                                return win.keyLabel("esc vim mode · ctrl+s save · ? help");
                             const label = win.editorMode === "visualLine" ? "VISUAL LINE"
                                 : win.editorMode === "visual" ? "VISUAL" : "NORMAL";
                             const pending = win.pendingD ? "  d" : win.pendingG ? "  g" : "";
@@ -1426,7 +1444,7 @@ ApplicationWindow {
                         if (win.mode === "cards")
                             return "j/k move · enter open · l link here · y copy link · c new after · b branch · / search all topics · esc back";
                         if (win.previewSelMode !== "none")
-                            return "h/j/k/l move · gg/G top/bottom · y/ctrl+c/super+c yank · esc cancel"
+                            return win.keyLabel("h/j/k/l move · gg/G top/bottom · y/ctrl+c/super+c yank · esc cancel")
                                 + (win.previewPendingG ? "   g" : "");
                         return "j/k/↑/↓ move · / search · v/V visual select · enter restore · esc back";
                     }
@@ -1468,7 +1486,7 @@ ApplicationWindow {
                     wrapMode: TextArea.Wrap
                     text: backend.lastError
                     color: "#f7768e"
-                    font.family: "monospace"
+                    font.family: win.monoFont
                     font.pixelSize: 14
                     background: null
                     topPadding: 16
@@ -1487,7 +1505,7 @@ ApplicationWindow {
                     anchors.leftMargin: 12
                     color: backend.themeMuted
                     font.pixelSize: 12
-                    text: "select + ctrl+c/super+c to copy · esc/enter dismiss · also logged to " + backend.logPath
+                    text: win.keyLabel("select + ctrl+c/super+c to copy · esc/enter dismiss · also logged to ") + backend.logPath
                 }
             }
         }
@@ -1588,9 +1606,9 @@ ApplicationWindow {
                                     width: helpColumn.width
                                     spacing: 12
                                     Text {
-                                        text: modelData.key
+                                        text: win.keyLabel(modelData.key)
                                         color: backend.themeForeground
-                                        font.family: "monospace"
+                                        font.family: win.monoFont
                                         font.bold: true
                                         width: 90
                                     }
@@ -1743,7 +1761,7 @@ ApplicationWindow {
 
                 Text { text: "New topic"; font.bold: true; font.pixelSize: 16; color: backend.themeForeground }
                 Text {
-                    text: "Starts as its own blank note, branched off — switch back any time with Ctrl+T."
+                    text: win.keyLabel("Starts as its own blank note, branched off — switch back any time with Ctrl+T.")
                     color: backend.themeMuted
                     font.pixelSize: 12
                     wrapMode: Text.Wrap

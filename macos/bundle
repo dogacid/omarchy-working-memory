@@ -1,0 +1,46 @@
+#!/bin/bash
+# Builds a self-contained, signed "Working Memory.app" in build/dist/:
+# bin/build, then a fresh copy of the bundle with Qt deployed into it
+# (macdeployqt — so a `brew upgrade qt` can't break the installed app), then
+# signed with the hardened runtime notarization requires.
+#
+# Signing identity: $CODESIGN_IDENTITY if set, else the first "Developer ID
+# Application" certificate in the keychain, else ad-hoc ("-": runs on this
+# Mac only). Prints the .app's path as its last line.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DIST="$ROOT/build/dist"
+APP="$DIST/Working Memory.app"
+
+"$ROOT/bin/build" >&2
+
+IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning \
+  | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)}"
+IDENTITY="${IDENTITY:--}"
+
+rm -rf "$DIST"
+mkdir -p "$DIST"
+cp -R "$ROOT/build/omarchy-working-memory.app" "$APP"
+
+echo "Deploying Qt into the bundle..." >&2
+macdeployqt "$APP" -qmldir="$ROOT/src" -always-overwrite >&2
+
+echo "Signing as: $IDENTITY" >&2
+# The hardened runtime (needed for notarization only) turns on library
+# validation, which refuses every ad-hoc-signed framework (no Team ID to
+# match), so an ad-hoc build goes without it.
+if [[ "$IDENTITY" == "-" ]]; then
+  FLAGS=(--timestamp=none)
+else
+  FLAGS=(--timestamp --options runtime)
+fi
+# Inside out: every framework, plugin and dylib, then the app itself (with
+# the entitlements, which only the main executable carries).
+find "$APP/Contents" \( -name '*.dylib' -o -name '*.framework' \) -prune -print0 \
+  | xargs -0 codesign --force "${FLAGS[@]}" --sign "$IDENTITY" >&2
+codesign --force "${FLAGS[@]}" --entitlements "$ROOT/macos/entitlements.plist" \
+  --sign "$IDENTITY" "$APP" >&2
+codesign --verify --strict --deep "$APP" >&2
+
+echo "$APP"
