@@ -120,6 +120,50 @@ What's different from Omarchy:
   `working-memory-sync` host block, so only the key itself (step 1) and the
   remote (step 3) are needed.
 
+### On macOS
+
+The same Qt app builds as a menu-bar app for macOS 26+ (Apple silicon or
+Intel). There's no compositor to bind a key or float the window, so the app
+stays running in the background and does those itself (`src/macos.mm`):
+
+- **`Ctrl+Option+N`** opens or focuses the window from anywhere, or use the
+  note icon in the menu bar. There's no Dock icon.
+- **`Cmd+W`** closes the window, which saves, commits and pushes as on
+  Linux. The app keeps running, and reopening the window does the same
+  locked sync a fresh launch does, so another machine's edits are in before
+  you type.
+- **Shortcuts use `Cmd`** wherever this README says `Ctrl` (`Cmd+R`
+  history, `Cmd+T` topics, `Cmd+I` cards, `Cmd+B` inbox, `Cmd+1`..`9`, …),
+  and `Option` for `Alt` (`Option+D` date). The vim keys are unchanged.
+  `?` in Normal mode shows them with Mac labels.
+- **Open at Login** is in the menu-bar menu.
+- **Data** lives in the same place as on Linux,
+  `~/.local/share/omarchy-working-memory`, so the sync setup in
+  [GitHub_Sync.md](GitHub_Sync.md) is identical.
+- **Theme**: the built-in Tokyo Night palette (there's no Omarchy theme to
+  follow).
+
+Install (needs Xcode and Homebrew):
+
+```sh
+brew install qt
+git clone https://github.com/dogacid/omarchy-working-memory.git
+cd omarchy-working-memory
+macos/install.sh
+```
+
+`macos/install.sh` builds a self-contained `Working Memory.app` (Qt copied
+into the bundle, so `brew upgrade qt` can't break it; the first build takes
+several minutes), installs it into `/Applications`, registers the capture
+extension's native messaging host with every Chromium-family browser it
+finds, and starts the app. Load `extension/` unpacked once in
+`chrome://extensions` for browser capture.
+
+It signs with your "Developer ID Application" certificate if the keychain
+has one, else ad-hoc (fine for this Mac). `macos/release.sh` builds a
+notarized `.dmg` that opens without a warning on any Mac. The one-time
+certificate and notary setup is at the top of that script.
+
 ## Keys
 
 | Key                  | Action                                    |

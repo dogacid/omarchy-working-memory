@@ -71,6 +71,11 @@ public:
     Q_INVOKABLE QString initialText() const;
     Q_INVOKABLE void noteEdited(const QString &text);
     Q_INVOKABLE void save();
+    // macOS only, where closing the window hides it but the app keeps
+    // running (see macos.h): reopening it runs the same locked sync as a
+    // fresh launch does on Linux (see syncLocked), so text edited on
+    // another machine meanwhile is in before you type.
+    Q_INVOKABLE void windowReopened();
     Q_INVOKABLE void dismissError();
 
     Q_INVOKABLE QVariantList historyEntries() const;

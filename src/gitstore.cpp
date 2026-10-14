@@ -1230,7 +1230,11 @@ QString GitStore::gitRun(const QStringList &args, bool *ok, const QByteArray &in
         }
         proc.setProcessEnvironment(env);
     }
-    proc.start(QStringLiteral("git"), args);
+    // A global commit.gpgsign (e.g. signing through 1Password's op-ssh-sign)
+    // would stop every autosave commit and pull merge on an approval prompt
+    // nobody's there to answer, until the timeout below fails it. Machine
+    // commits to a private note repo gain nothing from a signature.
+    proc.start(QStringLiteral("git"), QStringList{QStringLiteral("-c"), QStringLiteral("commit.gpgsign=false")} + args);
     if (!input.isEmpty())
         proc.write(input);
     proc.closeWriteChannel();
